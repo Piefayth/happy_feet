@@ -4,7 +4,7 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 
 use crate::{
-    Character, KinematicVelocity, align_with_surface,
+    BlockingNormals, Character, KinematicVelocity, align_with_surface,
     debug::DebugMode,
     ground::{Grounding, GroundingConfig},
 };
@@ -82,15 +82,24 @@ pub(crate) fn character_acceleration(
         &Character,
         &MoveInput,
         &mut KinematicVelocity,
+        &BlockingNormals,
         Option<(&Grounding, &GroundingConfig)>,
         &CharacterMovement,
         Has<DebugMode>,
     )>,
     time: Res<Time>,
 ) {
-    for (character, move_input, mut character_velocity, grounding, movement, debug_mode) in
-        &mut query
+    for (
+        character,
+        move_input,
+        mut character_velocity,
+        blocking_normals,
+        grounding,
+        movement,
+        debug_mode,
+    ) in &mut query
     {
+        let initial_speed = character_velocity.0.length();
         let Ok((direction, throttle)) = Dir3::new_and_length(move_input.value) else {
             continue;
         };
@@ -100,21 +109,25 @@ pub(crate) fn character_acceleration(
             continue;
         }
 
-        let mut direction = *direction;
+        let mut desired_direction = *direction;
         let mut velocity = character_velocity.0;
 
         if let Some((grounding, _grounding_settings)) = grounding {
             if let Some(normal) = grounding.normal() {
-                direction = align_with_surface(direction, *normal, *character.up);
+                desired_direction = align_with_surface(desired_direction, *normal, *character.up);
                 velocity = align_with_surface(velocity, *normal, *character.up);
             }
         }
 
+        let movement_effectiveness = blocking_normals.effective_movement_ratio(desired_direction);
+        if movement_effectiveness < 0.99 {
+            println!("BLOCKING MOVEMENT {:?}", movement_effectiveness);
+        }
         let move_accel = acceleration(
             velocity,
-            direction,
+            desired_direction,
             movement.acceleration * throttle,
-            movement.target_speed * throttle,
+            movement.target_speed * throttle * movement_effectiveness,
             time.delta_secs(),
         );
 
@@ -128,6 +141,16 @@ pub(crate) fn character_acceleration(
         // );
 
         character_velocity.0 += move_accel;
+
+        let final_speed = character_velocity.0.length();
+        let speed_change = final_speed - initial_speed;
+
+        if speed_change.abs() > 0.1 {
+            println!(
+                "ACCEL: Speed {:.2} -> {:.2} (change: {:.2})",
+                initial_speed, final_speed, speed_change
+            );
+        }
     }
 }
 

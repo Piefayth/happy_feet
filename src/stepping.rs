@@ -56,9 +56,7 @@ pub(crate) fn step_up(
     let step_up_position = origin + up * step_up;
     let step_size = forward_motion.max(config.min_step_forward) / config.max_iterations as f32;
     
-    println!("Step input motion: {:?}", forward_motion);
     for i in 0..config.max_iterations + 1 {
-        println!("  Step iteration {}", i);
         // Step forward
         let mut step_forward = step_size * i as f32;
         let mut hit_wall = false;
@@ -86,9 +84,6 @@ pub(crate) fn step_up(
 
         let step_forward_position = step_up_position + direction * step_forward;
 
-
-        println!("  Hit wall: {}", hit_wall);
-
         // Step down
         if let Some(hit) = sweep(
             shape,
@@ -103,8 +98,6 @@ pub(crate) fn step_up(
         ) {
             // We can step here!
             if step_up - hit.distance > EPSILON && can_step(hit) {
-                println!("      Stepping Forward: {}", step_forward);
-                println!("      Stepping Up: {}", step_up);
                 step_up -= hit.distance;
                 return Some(StepOutput {
                     step_forward,
@@ -118,7 +111,7 @@ pub(crate) fn step_up(
             break;
         }
     }
-    println!("Miss?");
+    
     None
 }
 

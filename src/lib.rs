@@ -322,6 +322,50 @@ pub struct OnStep {
     pub hit: SweepHitData,
 }
 
+#[derive(Component, Default, Debug)]
+pub struct BlockingNormals {
+    pub normals: Vec<Vec3>,
+}
+
+impl BlockingNormals {
+    pub fn clear(&mut self) {
+        self.normals.clear();
+    }
+    
+    pub fn add_blocking_normal(&mut self, normal: Vec3) {
+        if !self.normals.iter().any(|n| n.dot(normal) > 0.95) {
+            self.normals.push(normal);
+        }
+    }
+    
+    /// Calculate what fraction of movement in a given direction would be preserved after collision
+    pub fn effective_movement_ratio(&self, direction: Vec3) -> f32 {
+        if direction.length_squared() < 1e-6 {
+            return 1.0;
+        }
+        
+        let mut projected_direction = direction;
+        
+        for &normal in &self.normals {
+            let into_obstruction = projected_direction.dot(normal);
+            if into_obstruction < 0.0 {
+                let removal = normal * into_obstruction;
+                projected_direction -= removal;
+            }
+        }
+        
+        let original_length = direction.length();
+        let preserved_length = projected_direction.length();
+        
+        if original_length < 1e-6 {
+            1.0
+        } else {
+            preserved_length / original_length
+        }
+    }
+}
+
+
 pub(crate) fn move_character(
     mut commands: Commands,
     spatial_query: SpatialQuery,
@@ -338,6 +382,7 @@ pub(crate) fn move_character(
         Has<Sensor>,
         Option<&mut DebugMotion>,
         Has<DebugMode>,
+        &mut BlockingNormals,
     )>,
     mut rigidbodies: Query<(&RigidBody, &CollisionLayers)>,
     mut collision_started_events: EventWriter<CollisionStarted>,
@@ -357,8 +402,12 @@ pub(crate) fn move_character(
         is_sensor,
         mut debug_motion,
         debug_mode,
+        mut blocking_normals
     ) in &mut query
     {
+
+        blocking_normals.clear();
+
         if is_sensor {
             transform.translation += velocity.0 * time.delta_secs();
             continue;
@@ -418,7 +467,11 @@ pub(crate) fn move_character(
             &spatial_query,
             duration,
             |velocity, surface| match grounding {
-                Some(_) => surface.project_velocity(velocity, current_ground_normal, character.up),
+                Some(_) => {
+                    let projected_velocity = surface.project_velocity(velocity, current_ground_normal, character.up);
+                    projected_velocity
+
+                }
                 None => velocity.reject_from(*surface.normal),
             },
             |state,
@@ -438,6 +491,10 @@ pub(crate) fn move_character(
                         is_walkable: false,
                     },
                 };
+
+                if !surface.is_walkable {
+                    blocking_normals.add_blocking_normal(*surface.normal);
+                }
 
                 // Try to step over obstacles
                 if let Some((
@@ -663,6 +720,7 @@ pub(crate) fn move_character(
     GroundingConfig,
     CharacterFriction,
     MoveInput,
+    BlockingNormals
 )]
 pub struct Character {
     // Not sure if this should be here or in GroundingConfig
