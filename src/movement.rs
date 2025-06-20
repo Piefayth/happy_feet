@@ -99,7 +99,6 @@ pub(crate) fn character_acceleration(
         debug_mode,
     ) in &mut query
     {
-        let initial_speed = character_velocity.0.length();
         let Ok((direction, throttle)) = Dir3::new_and_length(move_input.value) else {
             continue;
         };
@@ -123,12 +122,13 @@ pub(crate) fn character_acceleration(
         if movement_effectiveness < 0.99 {
             println!("BLOCKING MOVEMENT {:?}", movement_effectiveness);
         }
-        let move_accel = acceleration(
+        let move_accel = acceleration_with_horizontal_limit(
             velocity,
             desired_direction,
             movement.acceleration * throttle,
             movement.target_speed * throttle * movement_effectiveness,
             time.delta_secs(),
+            character.up,
         );
 
         // let move_accel = acceleration_with_brake(
@@ -141,16 +141,6 @@ pub(crate) fn character_acceleration(
         // );
 
         character_velocity.0 += move_accel;
-
-        let final_speed = character_velocity.0.length();
-        let speed_change = final_speed - initial_speed;
-
-        if speed_change.abs() > 0.1 {
-            println!(
-                "ACCEL: Speed {:.2} -> {:.2} (change: {:.2})",
-                initial_speed, final_speed, speed_change
-            );
-        }
     }
 }
 
@@ -284,25 +274,60 @@ pub fn feet_position(shape: &Collider, rotation: Quat, up: Dir3, skin_width: f32
 }
 
 #[must_use]
-fn acceleration(
+fn acceleration_with_horizontal_limit(
     velocity: Vec3,
     direction: Vec3,
     max_acceleration: f32,
     target_speed: f32,
     delta: f32,
+    up: Dir3,
 ) -> Vec3 {
-    // Current speed in the desired direction.
-    let current_speed = velocity.dot(direction);
+    // Split velocity into horizontal and vertical components
+    let horizontal_velocity = velocity.reject_from(*up);
+    let horizontal_speed = horizontal_velocity.length();
 
-    // No acceleration is needed if current speed exceeds target.
-    if current_speed >= target_speed {
+    // Project direction to horizontal plane
+    let horizontal_direction = (direction - direction.project_onto(*up)).normalize_or_zero();
+
+    // If we're under the speed limit, use normal acceleration
+    if horizontal_speed < target_speed {
+        let remaining_speed = target_speed - horizontal_speed;
+        let max_accel_this_frame = max_acceleration * delta;
+        let accel_magnitude = max_accel_this_frame.min(remaining_speed);
+        return horizontal_direction * accel_magnitude;
+    }
+
+    // We're at max speed - redirect the horizontal velocity toward the input direction
+    // while preserving the magnitude
+    if horizontal_speed < 1e-6 {
         return Vec3::ZERO;
     }
 
-    // Clamp to avoid acceleration past the target speed.
-    let accel_speed = f32::min(target_speed - current_speed, max_acceleration * delta);
+    let current_horizontal_direction = horizontal_velocity / horizontal_speed;
 
-    direction * accel_speed
+    // Calculate how fast we can rotate toward the desired direction
+    let rotation_rate = max_acceleration * delta / horizontal_speed; // radians per frame
+    let max_rotation_this_frame = rotation_rate.min(1.0); // Cap at 1 radian per frame
+
+    // Slerp (spherical linear interpolation) between current and desired direction
+    let dot = current_horizontal_direction
+        .dot(horizontal_direction)
+        .clamp(-1.0, 1.0);
+    let angle = dot.acos();
+
+    let new_direction = if angle < 1e-6 {
+        // Already pointing in the right direction
+        current_horizontal_direction
+    } else {
+        let t = (max_rotation_this_frame / angle).min(1.0);
+        current_horizontal_direction
+            .lerp(horizontal_direction, t)
+            .normalize()
+    };
+
+    // Return the acceleration needed to change to the new velocity
+    let new_horizontal_velocity = new_direction * horizontal_speed;
+    new_horizontal_velocity - horizontal_velocity
 }
 
 #[must_use]
