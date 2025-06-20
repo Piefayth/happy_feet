@@ -54,11 +54,13 @@ pub(crate) fn step_up(
     }
 
     let step_up_position = origin + up * step_up;
-    let step_size = config.max_step_forward / config.max_iterations.max(1) as f32;
-
+    let step_size = forward_motion.max(config.min_step_forward) / config.max_iterations as f32;
+    
+    println!("Step input motion: {:?}", forward_motion);
     for i in 0..config.max_iterations + 1 {
+        println!("  Step iteration {}", i);
         // Step forward
-        let mut step_forward = forward_motion + step_size * i as f32;
+        let mut step_forward = step_size * i as f32;
         let mut hit_wall = false;
 
         if let Some(hit) = sweep(
@@ -81,7 +83,11 @@ pub(crate) fn step_up(
             step_forward = hit.distance;
         }
 
+
         let step_forward_position = step_up_position + direction * step_forward;
+
+
+        println!("  Hit wall: {}", hit_wall);
 
         // Step down
         if let Some(hit) = sweep(
@@ -97,6 +103,8 @@ pub(crate) fn step_up(
         ) {
             // We can step here!
             if step_up - hit.distance > EPSILON && can_step(hit) {
+                println!("      Stepping Forward: {}", step_forward);
+                println!("      Stepping Up: {}", step_up);
                 step_up -= hit.distance;
                 return Some(StepOutput {
                     step_forward,
@@ -110,7 +118,7 @@ pub(crate) fn step_up(
             break;
         }
     }
-
+    println!("Miss?");
     None
 }
 
@@ -130,13 +138,13 @@ pub enum SteppingBehaviour {
 #[require(GroundingConfig, SteppingBehaviour)]
 pub struct SteppingConfig {
     pub max_step_up: f32,
-    pub max_step_forward: f32,
+    pub min_step_forward: f32,
     pub max_iterations: usize,
 }
 
 impl SteppingConfig {
     pub fn is_valid(&self) -> bool {
-        self.max_step_up > 0.0 && self.max_step_forward > 0.0
+        self.max_step_up > 0.0 && self.min_step_forward > 0.0
     }
 }
 
@@ -144,7 +152,7 @@ impl Default for SteppingConfig {
     fn default() -> Self {
         Self {
             max_step_up: 0.25,
-            max_step_forward: 0.4,
+            min_step_forward: 0.4,
             max_iterations: 8,
         }
     }
