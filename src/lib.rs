@@ -331,21 +331,21 @@ impl BlockingNormals {
     pub fn clear(&mut self) {
         self.normals.clear();
     }
-    
+
     pub fn add_blocking_normal(&mut self, normal: Vec3) {
         if !self.normals.iter().any(|n| n.dot(normal) > 0.95) {
             self.normals.push(normal);
         }
     }
-    
+
     /// Calculate what fraction of movement in a given direction would be preserved after collision
     pub fn effective_movement_ratio(&self, direction: Vec3) -> f32 {
         if direction.length_squared() < 1e-6 {
             return 1.0;
         }
-        
+
         let mut projected_direction = direction;
-        
+
         for &normal in &self.normals {
             let into_obstruction = projected_direction.dot(normal);
             if into_obstruction < 0.0 {
@@ -353,10 +353,10 @@ impl BlockingNormals {
                 projected_direction -= removal;
             }
         }
-        
+
         let original_length = direction.length();
         let preserved_length = projected_direction.length();
-        
+
         if original_length < 1e-6 {
             1.0
         } else {
@@ -364,7 +364,6 @@ impl BlockingNormals {
         }
     }
 }
-
 
 pub(crate) fn move_character(
     mut commands: Commands,
@@ -402,10 +401,9 @@ pub(crate) fn move_character(
         is_sensor,
         mut debug_motion,
         debug_mode,
-        mut blocking_normals
+        mut blocking_normals,
     ) in &mut query
     {
-
         blocking_normals.clear();
 
         if is_sensor {
@@ -468,9 +466,9 @@ pub(crate) fn move_character(
             duration,
             |velocity, surface| match grounding {
                 Some(_) => {
-                    let projected_velocity = surface.project_velocity(velocity, current_ground_normal, character.up);
+                    let projected_velocity =
+                        surface.project_velocity(velocity, current_ground_normal, character.up);
                     projected_velocity
-
                 }
                 None => velocity.reject_from(*surface.normal),
             },
@@ -552,14 +550,14 @@ pub(crate) fn move_character(
                                     step_offset: offset,
                                     hit,
                                 });
-
+                                println!("Velocity before step alignment: {:?}", state.velocity);
                                 state.velocity =
                                     align_with_surface(state.velocity, hit.normal, *character.up);
                                 state.ground = Some(Ground::new(hit.entity, hit.normal));
                                 state.offset += offset;
                                 state.remaining_time =
                                     (state.remaining_time - step_forward * duration).max(0.0);
-
+                                println!("Velocity after step alignment: {:?}", state.velocity);
                                 did_step = true;
 
                                 return None;
@@ -684,14 +682,7 @@ pub(crate) fn move_character(
                     _ => {}
                 }
 
-                if let Some(ground) = movement.ground {
-                    // Make sure the character is not launched up after stepping.
-                    // FIXME: doesn't really work
-                    if did_step {
-                        movement.velocity =
-                            align_with_surface(movement.velocity, *ground.normal, *character.up);
-                    }
-                } else if grounding.is_grounded() && movement.velocity.dot(*character.up) < 0.0 {
+                if grounding.is_grounded() && movement.velocity.dot(*character.up) < 0.0 {
                     movement.velocity =
                         align_with_surface(movement.velocity, *character.up, *character.up);
                 }
