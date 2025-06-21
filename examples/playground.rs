@@ -210,7 +210,7 @@ fn setup(
         MovementMode::Walking,
         (
             Character::default(),
-            DebugMotion::default(),
+            DebugMotion::new(128),
             DebugInput,
             CharacterMovement::DEFAULT_AIR,
             CharacterGravity::default(),

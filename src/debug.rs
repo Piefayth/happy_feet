@@ -4,11 +4,7 @@ use avian3d::prelude::*;
 use bevy::{color::palettes::css::*, prelude::*};
 
 use crate::{
-    Character, KinematicVelocity, feet_position,
-    ground::Grounding,
-    move_character,
-    movement::{CharacterMovement, MoveInput},
-    sweep::CollideAndSlideConfig,
+    feet_position, ground::Grounding, move_character_three_pass, movement::{CharacterMovement, MoveInput}, sweep::CollideAndSlideConfig, Character, KinematicVelocity
 };
 
 pub(crate) fn plugin(app: &mut App) {
@@ -27,7 +23,7 @@ pub(crate) fn plugin(app: &mut App) {
 
     app.add_systems(
         FixedPostUpdate,
-        (draw_input_arrow, draw_motion).after(move_character),
+        (draw_input_arrow, draw_motion).after(move_character_three_pass),
     );
 }
 
