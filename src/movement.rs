@@ -4,7 +4,7 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 
 use crate::{
-    BlockingNormals, Character, KinematicVelocity, align_with_surface,
+    Character, KinematicVelocity, align_with_surface,
     debug::DebugMode,
     ground::{Grounding, GroundingConfig},
 };
@@ -82,7 +82,6 @@ pub(crate) fn character_acceleration(
         &Character,
         &MoveInput,
         &mut KinematicVelocity,
-        &BlockingNormals,
         Option<(&Grounding, &GroundingConfig)>,
         &CharacterMovement,
         Has<DebugMode>,
@@ -93,7 +92,6 @@ pub(crate) fn character_acceleration(
         character,
         move_input,
         mut character_velocity,
-        blocking_normals,
         grounding,
         movement,
         debug_mode,
@@ -118,15 +116,11 @@ pub(crate) fn character_acceleration(
             }
         }
 
-        let movement_effectiveness = blocking_normals.effective_movement_ratio(desired_direction);
-        if movement_effectiveness < 0.99 {
-            println!("BLOCKING MOVEMENT {:?}", movement_effectiveness);
-        }
         let move_accel = acceleration_with_horizontal_limit(
             velocity,
             desired_direction,
             movement.acceleration * throttle,
-            movement.target_speed * throttle * movement_effectiveness,
+            movement.target_speed * throttle,
             time.delta_secs(),
             character.up,
         );
