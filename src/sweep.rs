@@ -98,6 +98,8 @@ pub(crate) fn collide_and_slide(
     filter: &SpatialQueryFilter,
     spatial_query: &SpatialQuery,
     delta: f32,
+    is_character_grounded: bool, // NEW PARAMETER
+    up_direction: Dir3, // NEW PARAMETER
     mut project_velocity: impl FnMut(Vec3, Surface) -> Vec3,
     mut on_hit: impl FnMut(&mut MovementState, MovementImpact) -> Option<Surface>,
     debug_config: &MovementDebugConfig,
@@ -112,8 +114,8 @@ pub(crate) fn collide_and_slide(
     let mut previous_velocity = state.velocity;
     let mut collision_state = CollisionState::default();
 
-    debug_log!(debug_config, "    Collide_and_slide START: velocity={:?}, delta={:.3}, max_iter={}", 
-          velocity, delta, config.max_iterations);
+    debug_log!(debug_config, "    Collide_and_slide START: velocity={:?}, delta={:.3}, max_iter={}, character_grounded={}", 
+          velocity, delta, config.max_iterations, is_character_grounded);
 
     for iteration in 0..config.max_iterations {
         let Ok((direction, max_distance)) =
@@ -172,16 +174,12 @@ pub(crate) fn collide_and_slide(
 
         // *** KEY CHANGE: Handle stepping through position displacement, not velocity ***
         let blocked_velocity = state.velocity.dot(hit.normal);
-        
-        // For stepping, assume grounded if we have horizontal velocity (typical grounded movement)
-        let horizontal_speed = state.velocity.reject_from(Vec3::Y).length();
-        let is_likely_grounded = horizontal_speed > 1.0; // Character moving horizontally = likely grounded
         let is_moving_into_wall = blocked_velocity < 0.0;
         
-        debug_log!(debug_config, "      Iteration {}: blocked_velocity={:.3}, is_likely_grounded={}, is_moving_into_wall={}", 
-                  iteration, blocked_velocity, is_likely_grounded, is_moving_into_wall);
+        debug_log!(debug_config, "      Iteration {}: blocked_velocity={:.3}, is_character_grounded={}, is_moving_into_wall={}", 
+                  iteration, blocked_velocity, is_character_grounded, is_moving_into_wall);
         
-        if !surface.is_walkable && is_likely_grounded && is_moving_into_wall {
+        if !surface.is_walkable && is_character_grounded && is_moving_into_wall {
             // STEPPING: Add upward position displacement instead of changing velocity
             let blocked_speed = blocked_velocity.abs();
             let step_height = blocked_speed * delta * 0.5; // Convert blocked velocity to step height
@@ -190,8 +188,7 @@ pub(crate) fn collide_and_slide(
                       iteration, blocked_speed, step_height);
             
             // Add upward displacement for stepping
-            let up_direction = Vec3::Y; // or get from character
-            state.offset += up_direction * step_height;
+            state.offset += *up_direction * step_height;
         }
 
         let velocity_before_projection = state.velocity;
