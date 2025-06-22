@@ -557,8 +557,14 @@ pub(crate) fn move_character_physx_style(
             }
         }
 
-        // Clear ground before DOWN pass (PhysX pattern)
-        movement_state.ground = None;
+        // Clear ground before DOWN pass (TODO: Does PhysX do this? is this right? it WORKS...)
+        let executed_other_passes = up_vector.is_some() || side_vector.is_some();
+        if executed_other_passes {
+            movement_state.ground = None;
+            debug_log!(debug_config, "Cleared ground state for DOWN pass after other passes");
+        } else {
+            debug_log!(debug_config, "Preserving ground state - DOWN pass only");
+        }
 
         // PASS 3: DOWN with step offset correction
         if let Some(down_motion) = down_vector {
