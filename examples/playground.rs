@@ -116,7 +116,7 @@ impl MovementMode {
                 CharacterMovement::DEFAULT_AIR,
                 CharacterDrag::default(),
                 CharacterGravity(Vec3::NEG_Y * 20.0),
-                CharacterFriction::ZERO,
+                CharacterFriction::default(),
             ),
             (MovementMode::Flying, _) => (
                 CharacterMovement::DEFAULT_GROUND,

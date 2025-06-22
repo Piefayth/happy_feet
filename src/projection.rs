@@ -39,10 +39,6 @@ impl Surface {
         Ok(self.normal)
     }
 
-    #[must_use]
-    pub fn align_velocity(&self, velocity: Vec3, up_direction: Dir3) -> Vec3 {
-        align_with_surface(velocity, *self.normal, *up_direction)
-    }
 
     #[must_use]
     pub fn project_velocity(
@@ -65,77 +61,6 @@ impl Surface {
     }
 }
 
-/// Represents the current state of collision resolution during movement.
-#[derive(Default, Debug, Clone, Copy)]
-pub(crate) enum CollisionState {
-    /// Initial state before any collision.
-    #[default]
-    Initial,
-    /// Character has collided with a single plane.
-    Plane { previous_surface: Surface },
-    /// Character has collided with two planes forming a crease.
-    Crease,
-    /// Character has reached a corner or complex geometry that prevents further movement.
-    Corner,
-}
-
-impl CollisionState {
-    #[must_use]
-    pub fn update(
-        &mut self,
-        surface: Surface,
-        velocity: Vec3,
-        previous_velocity: Vec3,
-        is_grounded: bool,
-        mut project_velocity: impl FnMut(Vec3) -> Vec3,
-    ) -> Vec3 {
-        // Short-circuit for walkable surfaces - always allow movement
-        if surface.is_walkable {
-            return project_velocity(velocity);
-        }
-
-        match *self {
-            // First collision
-            CollisionState::Initial => {
-                *self = Self::Plane {
-                    previous_surface: surface,
-                };
-                project_velocity(velocity)
-            }
-            // Second collision
-            CollisionState::Plane { previous_surface } => {
-                if let Some(crease) = detect_crease(
-                    surface,
-                    previous_surface,
-                    velocity,
-                    previous_velocity,
-                    is_grounded,
-                ) {
-                    // If grounded, stop movement at creases
-                    if is_grounded {
-                        *self = Self::Corner;
-                        Vec3::ZERO
-                    } else {
-                        // Otherwise project along the crease direction
-                        *self = Self::Crease;
-                        velocity.project_onto(*crease)
-                    }
-                } else {
-                    *self = Self::Plane {
-                        previous_surface: surface,
-                    };
-                    project_velocity(velocity)
-                }
-            }
-            // Third collision, stop movement
-            CollisionState::Crease => {
-                *self = Self::Corner;
-                Vec3::ZERO
-            }
-            CollisionState::Corner => Vec3::ZERO,
-        }
-    }
-}
 
 pub(crate) fn project_velocity(
     velocity: Vec3,
@@ -226,41 +151,4 @@ pub(crate) fn align_with_surface(vector: Vec3, normal: Vec3, up: Vec3) -> Vec3 {
     let right = vector.cross(up);
     let forward = normal.cross(right);
     forward.normalize_or_zero() * vector.length()
-}
-
-/// Align the vector with the `normal` plane along the `up` axis.
-pub(crate) fn project_on_surface(vector: Vec3, normal: Vec3, up: Vec3) -> Vec3 {
-    let right = vector.cross(up);
-    let Ok(forward) = Dir3::new(normal.cross(right)) else {
-        return Vec3::ZERO;
-    };
-    vector.project_onto_normalized(*forward)
-}
-
-/// Align the vector with the `normal` plane along the `up` axis, maintaining the horizontal component.
-pub(crate) fn shift_to_surface(vector: Vec3, normal: Vec3, up: Vec3) -> Vec3 {
-    // Extract the horizontal component (perpendicular to up)
-    let vertical = vector.project_onto(up);
-    let horizontal = vector - vertical;
-
-    // Calculate the new vertical component that aligns with the normal
-    // We need to find the point where a line from the horizontal component
-    // parallel to up intersects the plane defined by normal
-
-    // First, check if the normal has a component along the up direction
-    let normal_dot_up = normal.dot(up);
-
-    if normal_dot_up.abs() < f32::EPSILON {
-        // The normal is perpendicular to up, so the surface is vertical
-        // In this case, there's no way to align with the surface by just moving vertically
-        return vertical;
-    }
-
-    // Calculate the scaling factor for the up vector
-    // This comes from the plane equation: normal·(horizontal_component + t*up) = 0
-    // Solving for t: t = -normal·horizontal_component / normal·up
-    let scale = -normal.dot(horizontal) / normal_dot_up;
-
-    // Return the horizontal component plus the new vertical component
-    horizontal + scale * up
 }

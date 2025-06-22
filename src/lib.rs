@@ -7,7 +7,7 @@ use bevy::{
 };
 
 use debug::{CharacterGizmos, DebugHit, DebugMode, DebugMotion, DebugPoint};
-use ground::{Ground, Grounding, GroundingConfig, ground_check, is_walkable};
+use ground::{Ground, Grounding, GroundingConfig, is_walkable};
 use interactions::physics_interactions;
 use movement::{
     CharacterDrag, CharacterFriction, CharacterGravity, CharacterMovement, MoveInput,
@@ -18,9 +18,9 @@ use platform::{
     InheritedVelocity, PhysicsMover, inherit_platform_velocity, move_with_platform,
     update_physics_mover, update_platform_velocity,
 };
-use projection::{CollisionState, Surface, align_with_surface, project_velocity};
-use stepping::{MotionBudget, PassType, SteppingBehaviour, SteppingConfig};
-use sweep::{CollideAndSlideConfig, MovementImpact, SweepHitData, collide_and_slide, sweep};
+use projection::{Surface, align_with_surface, project_velocity};
+use stepping::{SteppingBehaviour, SteppingConfig};
+use sweep::{CollideAndSlideConfig, SweepHitData, sweep};
 
 // ... (all the mod declarations and imports stay the same) ...
 
@@ -329,27 +329,6 @@ pub struct OnStep {
     pub hit: SweepHitData,
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct MovementState {
-    pub position: Vec3,
-    pub velocity: Vec3,
-    pub ground: Option<Ground>,
-    pub remaining_time: f32, // PhysX-style time budget
-    pub collision_flags: u32,
-}
-
-impl MovementState {
-    fn new(position: Vec3, velocity: Vec3, delta_time: f32) -> Self {
-        Self {
-            position,
-            velocity,
-            ground: None,
-            remaining_time: delta_time, // Start with full time budget
-            collision_flags: 0,
-        }
-    }
-}
-
 /// Resource to control movement debug logging
 #[derive(Resource, Default)]
 pub struct MovementDebugConfig {
@@ -482,7 +461,7 @@ pub(crate) fn move_character_physx_style(
                   down_vector.map(|v| (v, v.length())));
 
         // Initialize PhysX movement state
-        let mut movement_state = PhysXMovementState::new(transform.translation, total_displacement);
+        let mut movement_state = PhysXMovementState::new(transform.translation);
         movement_state.ground = grounding.as_ref().and_then(|(g, _)| g.inner_ground());
 
         let min_distance = collide_and_slide_config.skin_width * 0.1; // PhysX uses small minimum
@@ -535,7 +514,7 @@ pub(crate) fn move_character_physx_style(
         // PASS 2: SIDE
         if let Some(side_motion) = side_vector {
             // Add side motion to current target
-            movement_state.target_orientation += side_motion;
+            movement_state.target_orientation = movement_state.current_position + side_motion;
             
             let had_collision = execute_physx_movement_pass(
                 &mut movement_state,
@@ -579,7 +558,7 @@ pub(crate) fn move_character_physx_style(
                       down_motion, corrected_down_motion);
 
             // Add down motion to current target
-            movement_state.target_orientation += corrected_down_motion;
+            movement_state.target_orientation = movement_state.current_position + corrected_down_motion;
             
             let had_collision = execute_physx_movement_pass(
                 &mut movement_state,
@@ -713,13 +692,6 @@ fn decompose_velocity(velocity: Vec3, up_direction: Dir3) -> (Vec3, Vec3) {
     (vertical, horizontal)
 }
 
-// Enhanced result struct to track PhysX-style state
-#[derive(Debug, Clone)]
-struct PassResult {
-    had_collision: bool,
-    hit_static_geometry: bool,
-    contact_normal: Option<Vec3>,
-}
 
 #[derive(Debug, Clone)]
 pub(crate) struct PhysXMovementState {
@@ -734,10 +706,10 @@ pub(crate) struct PhysXMovementState {
 }
 
 impl PhysXMovementState {
-    fn new(position: Vec3, total_displacement: Vec3) -> Self {
+    fn new(position: Vec3) -> Self { // REMOVE total_displacement
         Self {
             current_position: position,
-            target_orientation: position + total_displacement,
+            target_orientation: position, // Initialize to current position
             ground: None,
             collision_flags: 0,
             validate_triangle_down: false,

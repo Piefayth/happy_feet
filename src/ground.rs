@@ -3,8 +3,6 @@ use std::{f32::consts::PI, fmt::Debug};
 use avian3d::prelude::*;
 use bevy::prelude::*;
 
-use crate::sweep::{SweepHitData, sweep};
-
 #[derive(Component, Reflect, Debug, Clone, Copy)]
 #[reflect(Component, Default)]
 #[require(Grounding)]
@@ -129,34 +127,6 @@ impl Ground {
     }
 }
 
-/// Sweep in the opposite direction of `up` and return the [`Ground`] if it's walkable.
-pub(crate) fn ground_check(
-    collider: &Collider,
-    translation: Vec3,
-    rotation: Quat,
-    up: Dir3,
-    max_distance: f32,
-    skin_width: f32,
-    walkable_angle: f32,
-    spatial_query: &SpatialQuery,
-    filter: &SpatialQueryFilter,
-) -> Option<(Ground, SweepHitData)> {
-    let hit = sweep(
-        collider,
-        translation,
-        rotation,
-        -up,
-        max_distance,
-        skin_width,
-        spatial_query,
-        filter,
-        true,
-    )?;
-
-    let ground = Ground::new_if_walkable(hit.entity, hit.normal, up, walkable_angle)?;
-
-    Some((ground, hit))
-}
 
 pub(crate) fn is_walkable(normal: Vec3, walkable_angle: f32, up: Vec3) -> bool {
     normal.angle_between(up) <= walkable_angle
