@@ -22,6 +22,8 @@ use projection::{CollisionState, Surface, align_with_surface, project_velocity};
 use stepping::{MotionBudget, PassType, SteppingBehaviour, SteppingConfig};
 use sweep::{CollideAndSlideConfig, MovementImpact, SweepHitData, collide_and_slide, sweep};
 
+// ... (all the mod declarations and imports stay the same) ...
+
 pub mod debug;
 pub mod ground;
 pub(crate) mod interactions;
@@ -385,23 +387,12 @@ fn compute_pass_vectors(
         None
     };
 
-    // DOWN PASS: Gravity + undo artificial up motion
-    let down_vector = if !is_moving_up || has_horizontal_motion {
-        let mut down = if is_moving_up {
-            Vec3::ZERO
-        } else {
-            vertical_component
-        };
-
-        // Only subtract artificial up motion if we added it (and we're not jumping)
-        if has_horizontal_motion && stepping_config.is_some() && is_grounded && !is_moving_up {
-            let step_offset = stepping_config.unwrap().max_step_up;
-            down -= *up_direction * step_offset;
-        }
-
-        Some(down)
+    // DOWN PASS: Gravity + potentially undo artificial up motion
+    // KEY FIX: Don't assume we stepped the full amount - this will be calculated dynamically
+    let down_vector = if !is_moving_up {
+        Some(vertical_component) // Just gravity, no step offset subtraction here
     } else {
-        None
+        None // No down pass when jumping
     };
 
     (up_vector, side_vector, down_vector)
@@ -438,6 +429,12 @@ macro_rules! debug_log {
     };
 }
 
+// Key changes based on actual PhysX behavior:
+// 1. Ground state PERSISTS between frames (like mTouchedShape in PhysX)
+// 2. Ground is validated/cleared only when movement happens
+// 3. No additional ground checks after movement
+// 4. Simple ground state management
+
 pub(crate) fn move_character_three_pass(
     mut commands: Commands,
     spatial_query: SpatialQuery,
@@ -456,9 +453,6 @@ pub(crate) fn move_character_three_pass(
         Option<&mut DebugMotion>,
         Has<DebugMode>,
     )>,
-    mut rigidbodies: Query<(&RigidBody, &CollisionLayers)>,
-    mut collision_started_events: EventWriter<CollisionStarted>,
-    mut collision_ended_events: EventWriter<CollisionEnded>,
     time: Res<Time>,
 ) {
     for (
@@ -484,6 +478,7 @@ pub(crate) fn move_character_three_pass(
         let initial_velocity = velocity.0;
         let current_ground_normal = grounding.as_ref().and_then(|(g, _)| g.normal());
         let is_grounded = grounding.as_ref().map_or(false, |(g, _)| g.is_grounded());
+        let original_height = transform.translation.dot(*character.up);
 
         debug_log!(debug_config, "=== MOVEMENT FRAME START ===");
         debug_log!(
@@ -502,13 +497,45 @@ pub(crate) fn move_character_three_pass(
 
         let duration = time.delta_secs();
 
-        // Compute the three pass vectors
-        let (up_vector, side_vector, down_vector) = compute_pass_vectors(
-            velocity.0,
-            character.up,
-            stepping_config.map(|(config, _)| config),
-            is_grounded,
-        );
+        // PhysX decomposition
+        let (vertical_component, horizontal_component) = decompose_velocity(velocity.0, character.up);
+        let dir_dot_up = velocity.0.dot(*character.up);
+        let has_horizontal_motion = horizontal_component.length_squared() > 1e-6;
+        let is_moving_up = dir_dot_up > 0.0;
+
+        // PhysX step offset logic - key insight: this is the INTENDED step offset, may be clamped later
+        let mut step_offset = stepping_config.map(|(config, _)| config.max_step_up).unwrap_or(0.0);
+
+        // Disable step offset when moving upward (PhysX line ~1296)
+        if is_moving_up {
+            step_offset = 0.0;
+            debug_log!(debug_config, "Disabled step offset - character is moving upward");
+        }
+
+        // PhysX pass vector computation - EXACTLY like PhysX
+        let up_vector = if is_moving_up {
+            // Actual upward motion (jumping) - this is velocity * time
+            Some(vertical_component * duration)
+        } else if has_horizontal_motion && is_grounded && step_offset > 0.0 {
+            // Artificial step offset (PhysX line ~1308) - this is pure displacement
+            Some(*character.up * step_offset)
+        } else {
+            None
+        };
+
+        let side_vector = if has_horizontal_motion {
+            // Horizontal motion - this is velocity * time  
+            Some(horizontal_component * duration)
+        } else {
+            None
+        };
+
+        let down_vector = if !is_moving_up {
+            // Gravity motion - this is velocity * time
+            Some(vertical_component * duration)
+        } else {
+            None
+        };
 
         debug_log!(
             debug_config,
@@ -517,34 +544,35 @@ pub(crate) fn move_character_three_pass(
             side_vector.map(|v| (v, v.length())),
             down_vector.map(|v| (v, v.length()))
         );
+        debug_log!(debug_config, "Initial step_offset: {:.6}", step_offset);
 
         let mut movement_state = MovementState::new(transform.translation, velocity.0, duration);
-        let mut total_collision_flags = 0u32;
-        let mut did_step = false;
+        movement_state.ground = grounding.as_ref().and_then(|(g, _)| g.inner_ground());
+
+        // PhysX state tracking booleans
+        let mut validate_triangle_down = false;
+        let mut validate_triangle_side = false;
+        let mut hit_non_walkable = false;
+        let mut collision_up = false;
+        let mut collision_sides = false;
+        let mut collision_down = false;
 
         debug_log!(
             debug_config,
-            "Movement state initialized - Velocity: {:?}, Remaining time: {:.3}",
+            "Movement state initialized - Velocity: {:?}, Ground: {:?}, Remaining time: {:.3}",
             movement_state.velocity,
+            movement_state.ground,
             movement_state.remaining_time
         );
 
         // PASS 1: UP
         if let Some(up_motion) = up_vector {
             debug_log!(debug_config, "--- UP PASS START ---");
-            debug_log!(
-                debug_config,
-                "Up motion vector: {:?} (magnitude: {:.3})",
-                up_motion,
-                up_motion.length()
-            );
-            debug_log!(
-                debug_config,
-                "Pre-up velocity: {:?}",
-                movement_state.velocity
-            );
+            debug_log!(debug_config, "UP motion: {:?} (artificial: {})", up_motion, !is_moving_up);
 
-            let result = execute_pass(
+            let initial_position = movement_state.position;
+            
+            let up_result = execute_pass(
                 &mut movement_state,
                 up_motion,
                 PassType::Up,
@@ -556,47 +584,42 @@ pub(crate) fn move_character_three_pass(
                 &spatial_query,
                 stepping_config.map(|(config, _)| config),
                 grounding.as_ref().map(|(_, config)| config).map(|v| &**v),
-                is_grounded,
                 &debug_config,
             );
 
+            if up_result.had_collision {
+                collision_up = true;
+            }
+
+            // CRITICAL PhysX step offset clamping (line ~1330)
+            if has_horizontal_motion && !is_moving_up && step_offset > 0.0 {
+                let actual_up_movement = (movement_state.position - initial_position).dot(*character.up);
+                
+                debug_log!(debug_config, "UP pass movement: intended={:.6}, actual={:.6}", 
+                          step_offset, actual_up_movement);
+                
+                // Clamp step offset to prevent undoing more than we did
+                if actual_up_movement < step_offset {
+                    step_offset = actual_up_movement.max(0.0);
+                    debug_log!(debug_config, "Clamped step offset: {:.6} -> {:.6}", 
+                              stepping_config.map(|(config, _)| config.max_step_up).unwrap_or(0.0), 
+                              step_offset);
+                }
+            }
+
             debug_log!(
                 debug_config,
-                "Post-up velocity: {:?} (magnitude: {:.3})",
-                movement_state.velocity,
-                movement_state.velocity.length()
-            );
-            debug_log!(
-                debug_config,
-                "Up pass offset: {:?}",
+                "Post-up: ground={:?}, offset={:?}",
+                movement_state.ground,
                 movement_state.position - transform.translation
             );
-            debug_log!(
-                debug_config,
-                "Remaining time after up: {:.3}",
-                movement_state.remaining_time
-            );
-
-            //total_collision_flags |= result.collision_flags << 2;
         }
 
         // PASS 2: SIDE
         if let Some(side_motion) = side_vector {
             debug_log!(debug_config, "--- SIDE PASS START ---");
-            debug_log!(
-                debug_config,
-                "Side motion vector: {:?} (magnitude: {:.3})",
-                side_motion,
-                side_motion.length()
-            );
-            debug_log!(
-                debug_config,
-                "Pre-side velocity: {:?} (magnitude: {:.3})",
-                movement_state.velocity,
-                movement_state.velocity.length()
-            );
 
-            let result = execute_pass(
+            let side_result = execute_pass(
                 &mut movement_state,
                 side_motion,
                 PassType::Side,
@@ -608,49 +631,58 @@ pub(crate) fn move_character_three_pass(
                 &spatial_query,
                 stepping_config.map(|(config, _)| config),
                 grounding.as_ref().map(|(_, config)| config).map(|v| &**v),
-                is_grounded,
                 &debug_config,
             );
 
+            if side_result.had_collision {
+                collision_sides = true;
+                if side_result.hit_static_geometry {
+                    validate_triangle_side = true;
+                    debug_log!(debug_config, "Side pass hit static geometry - enabling side validation");
+                }
+            }
+
             debug_log!(
                 debug_config,
-                "Post-side velocity: {:?} (magnitude: {:.3})",
-                movement_state.velocity,
-                movement_state.velocity.length()
-            );
-            debug_log!(
-                debug_config,
-                "Side pass offset: {:?}",
+                "Post-side: ground={:?}, offset={:?}",
+                movement_state.ground,
                 movement_state.position - transform.translation
             );
-            debug_log!(
-                debug_config,
-                "Remaining time after side: {:.3}",
-                movement_state.remaining_time
-            );
-
-            //   total_collision_flags |= result.collision_flags << 1;
         }
 
-        // PASS 3: DOWN
-        if let Some(down_motion) = down_vector {
-            debug_log!(debug_config, "--- DOWN PASS START ---");
-            debug_log!(
-                debug_config,
-                "Down motion vector: {:?} (magnitude: {:.3})",
-                down_motion,
-                down_motion.length()
-            );
-            debug_log!(
-                debug_config,
-                "Pre-down velocity: {:?} (magnitude: {:.3})",
-                movement_state.velocity,
-                movement_state.velocity.length()
-            );
+        // Clear ground before DOWN pass (PhysX pattern)
+        movement_state.ground = None;
+        debug_log!(debug_config, "  Cleared ground state for DOWN pass");
 
-            let result = execute_pass(
+        // PASS 3: DOWN with PhysX step offset subtraction
+        if let Some(down_motion) = down_vector {
+            let corrected_down_vector = if has_horizontal_motion && is_grounded && step_offset > 0.0 {
+                // PhysX line ~1359: Undo our artificial up motion
+                let corrected = down_motion - *character.up * step_offset;
+                debug_log!(
+                    debug_config,
+                    "DOWN pass: original={:?}, corrected={:?} (subtracted step_offset {:.6})",
+                    down_motion,
+                    corrected,
+                    step_offset
+                );
+                corrected
+            } else {
+                debug_log!(
+                    debug_config,
+                    "DOWN pass: no step offset subtraction (has_horizontal={}, was_grounded={}, step_offset={:.6})",
+                    has_horizontal_motion,
+                    is_grounded,
+                    step_offset
+                );
+                down_motion
+            };
+
+            debug_log!(debug_config, "--- DOWN PASS START ---");
+
+            let down_result = execute_pass(
                 &mut movement_state,
-                down_motion,
+                corrected_down_vector,
                 PassType::Down,
                 character,
                 collider,
@@ -660,97 +692,70 @@ pub(crate) fn move_character_three_pass(
                 &spatial_query,
                 stepping_config.map(|(config, _)| config),
                 grounding.as_ref().map(|(_, config)| config).map(|v| &**v),
-                is_grounded,
                 &debug_config,
             );
 
+            if down_result.had_collision {
+                if dir_dot_up <= 0.0 {
+                    collision_down = true;
+                }
+                if down_result.hit_static_geometry {
+                    validate_triangle_down = true;
+                    debug_log!(debug_config, "Down pass hit static geometry - enabling down validation");
+                }
+            }
+
             debug_log!(
                 debug_config,
-                "Post-down velocity: {:?} (magnitude: {:.3})",
-                movement_state.velocity,
-                movement_state.velocity.length()
-            );
-            debug_log!(
-                debug_config,
-                "Down pass offset: {:?}",
+                "Post-down: ground={:?}, offset={:?}",
+                movement_state.ground,
                 movement_state.position - transform.translation
             );
-            debug_log!(
-                debug_config,
-                "Remaining time after down: {:.3}",
-                movement_state.remaining_time
-            );
-
-            //total_collision_flags |= result.collision_flags;
         }
 
-        // Ground detection after all passes
-        if let Some((grounding, grounding_settings)) = grounding.as_ref() {
-            let walkable_angle = if grounding.is_grounded() {
-                grounding_settings.max_angle + 0.01 // Add epsilon for grounded characters
-            } else {
-                grounding_settings.max_angle
-            };
-
-            if let Some((ground, hit)) = ground_check(
-                collider,
-                movement_state.position,
-                transform.rotation,
-                character.up,
-                grounding_settings.max_distance,
-                collide_and_slide_config.skin_width,
-                walkable_angle,
-                &spatial_query,
-                &filter.0,
-            ) {
-                debug_log!(
-                    debug_config,
-                    "Ground detected: entity {:?}, normal {:?}, distance {:.3}",
-                    ground.entity,
-                    ground.normal,
-                    hit.distance
-                );
-                movement_state.ground = Some(ground);
-
-                if grounding_settings.snap_to_surface && hit.distance < 0.0 {
-                    debug_log!(
-                        debug_config,
-                        "Snapping to surface, distance: {:.3}",
-                        hit.distance
-                    );
-                    let hit_roof = sweep(
-                        collider,
-                        transform.translation,
-                        transform.rotation,
-                        character.up,
-                        -hit.distance,
-                        collide_and_slide_config.skin_width,
-                        &spatial_query,
-                        &filter.0,
-                        true,
-                    )
-                    .is_some();
-
-                    if !hit_roof {
-                        movement_state.position -= character.up * hit.distance;
-                        debug_log!(
-                            debug_config,
-                            "Snapped position: {:?}",
-                            movement_state.position
-                        );
-                    } else {
-                        debug_log!(debug_config, "Cannot snap - roof detected");
-                    }
+        // PhysX post-DOWN-pass slope validation
+        if validate_triangle_down && has_horizontal_motion && !hit_non_walkable {
+            if let Some(ground) = movement_state.ground {
+                let grounding_config = grounding.as_ref().map(|(_, config)| config).map(|v| &**v);
+                let max_slope = grounding_config.map_or(std::f32::consts::FRAC_PI_4, |g| g.max_angle);
+                
+                let slope_too_steep = ground.normal.dot(*character.up).acos() > max_slope;
+                if slope_too_steep {
+                    hit_non_walkable = true;
+                    debug_log!(debug_config, "Post-down slope validation failed - surface too steep");
                 }
-            } else {
-                debug_log!(debug_config, "No ground detected");
-                movement_state.ground = None;
             }
         }
 
         // Update grounding state and trigger events
         if let Some((grounding, _grounding_config)) = grounding.as_mut() {
-            match (grounding.inner_ground, movement_state.ground) {
+            let old_ground = grounding.inner_ground;
+            let new_ground = movement_state.ground;
+
+            // ENHANCED PhysX-style ground validation
+            let final_ground = if let Some(ground) = new_ground {
+                let net_vertical_displacement = (movement_state.position - transform.translation).dot(*character.up);
+                
+                // More permissive validation - allow small upward displacement due to step offset
+                let max_allowed_displacement = if has_horizontal_motion && is_grounded {
+                    // Allow step offset + small tolerance
+                    stepping_config.map(|(config, _)| config.max_step_up).unwrap_or(0.0) + collide_and_slide_config.skin_width
+                } else {
+                    collide_and_slide_config.skin_width * 2.0
+                };
+                
+                if net_vertical_displacement > max_allowed_displacement {
+                    debug_log!(debug_config, "Rejecting ground contact - too far from surface (displacement: {:.6}, max_allowed: {:.6})", 
+                              net_vertical_displacement, max_allowed_displacement);
+                    None
+                } else {
+                    Some(ground)
+                }
+            } else {
+                None
+            };
+
+            match (old_ground, final_ground) {
                 (Some(old_ground), None) => {
                     debug_log!(debug_config, "Lost ground: {:?}", old_ground);
                     commands.entity(entity).trigger(OnGroundLeave(old_ground));
@@ -759,35 +764,20 @@ pub(crate) fn move_character_three_pass(
                     debug_log!(debug_config, "Gained ground: {:?}", new_ground);
                     commands.entity(entity).trigger(OnGroundEnter(new_ground));
                 }
-                _ => {}
-            }
-
-            if let Some(ground) = movement_state.ground {
-                // Align velocity with ground surface after stepping
-                if did_step {
-                    let old_velocity = movement_state.velocity;
-                    movement_state.velocity =
-                        align_with_surface(movement_state.velocity, *ground.normal, *character.up);
+                (Some(old_ground), Some(new_ground)) if old_ground.entity != new_ground.entity => {
                     debug_log!(
                         debug_config,
-                        "Aligned velocity after stepping: {:?} -> {:?}",
-                        old_velocity,
-                        movement_state.velocity
+                        "Changed ground: {:?} -> {:?}",
+                        old_ground,
+                        new_ground
                     );
                 }
-            } else if grounding.is_grounded() && movement_state.velocity.dot(*character.up) < 0.0 {
-                let old_velocity = movement_state.velocity;
-                movement_state.velocity =
-                    align_with_surface(movement_state.velocity, *character.up, *character.up);
-                debug_log!(
-                    debug_config,
-                    "Aligned velocity (lost ground): {:?} -> {:?}",
-                    old_velocity,
-                    movement_state.velocity
-                );
+                _ => {
+                    // Same ground or no change
+                }
             }
 
-            **grounding = Grounding::new(movement_state.ground);
+            **grounding = Grounding::new(final_ground);
         }
 
         // Apply final results
@@ -800,31 +790,30 @@ pub(crate) fn move_character_three_pass(
             final_displacement,
             final_displacement.length()
         );
+        debug_log!(debug_config, "Net vertical displacement: {:.6}", 
+                  final_displacement.dot(*character.up));
 
-        // Velocity handling: Don't let the movement system destroy our velocity
-        // The issue is that movement_state.velocity gets overwritten by collision response
-        let velocity_before_final_handling = velocity.0;
+        // PhysX-style velocity handling: only modify when landing on ground AND moving downward
+        let (vertical_velocity, horizontal_velocity) = decompose_velocity(velocity.0, character.up);
 
-        if let Some(ground) = movement_state.ground {
-            // Just landed - preserve horizontal velocity, zero out downward velocity
-            let horizontal_vel = velocity.0.reject_from(*character.up);
-            let vertical_component = velocity.0.project_onto(*character.up);
-            let upward_vel = if vertical_component.dot(*character.up) > 0.0 {
-                vertical_component
+        if let Some(_ground) = movement_state.ground {
+            let is_moving_downward = vertical_velocity.dot(*character.up) <= 0.0;
+            
+            if is_moving_downward {
+                velocity.0 = horizontal_velocity;
+                debug_log!(
+                    debug_config,
+                    "Velocity (landed): removed downward velocity, keeping horizontal={:?}",
+                    horizontal_velocity
+                );
             } else {
-                Vec3::ZERO
-            };
-            velocity.0 = horizontal_vel + upward_vel;
-            debug_log!(
-                debug_config,
-                "Velocity (grounded): horizontal={:?}, upward={:?}, final={:?}",
-                horizontal_vel,
-                upward_vel,
-                velocity.0
-            );
+                debug_log!(
+                    debug_config,
+                    "Velocity (grounded, jumping): keeping all velocity={:?}",
+                    velocity.0
+                );
+            }
         } else {
-            // In air - don't modify velocity at all, the physics/input systems handle this
-            // The movement state velocity gets corrupted by collision response, so ignore it
             debug_log!(
                 debug_config,
                 "Velocity (airborne): keeping original {:?}",
@@ -835,43 +824,30 @@ pub(crate) fn move_character_three_pass(
         debug_log!(
             debug_config,
             "Velocity change: {:?} -> {:?} (magnitude: {:.3} -> {:.3})",
-            velocity_before_final_handling,
+            initial_velocity,
             velocity.0,
-            velocity_before_final_handling.length(),
+            initial_velocity.length(),
             velocity.0.length()
         );
 
-        // Debug motion tracking for visualization
-        if debug_mode {
-            if let Some(debug_motion) = debug_motion.as_mut() {
-                let mut point = transform.translation;
-                point += feet_position(
-                    collider,
-                    transform.rotation,
-                    character.up,
-                    collide_and_slide_config.skin_width,
-                );
+        debug_log!(
+            debug_config,
+            "Collision flags: UP={}, SIDE={}, DOWN={}, validate_tri_down={}, validate_tri_side={}, hit_non_walkable={}",
+            collision_up,
+            collision_sides, 
+            collision_down,
+            validate_triangle_down,
+            validate_triangle_side,
+            hit_non_walkable
+        );
 
-                debug_motion.push(
-                    duration,
-                    DebugPoint {
-                        translation: transform.translation,
-                        velocity: velocity.0,
-                        hit: current_ground_normal.map(|normal| DebugHit {
-                            point,
-                            normal: *normal,
-                            is_walkable: true,
-                        }),
-                    },
-                );
-            }
-        } else if let Some(debug_motion) = debug_motion.as_mut() {
-            // Regular debug motion tracking
-            let should_add_point = debug_motion.points.back().map_or(true, |(_, point)| {
-                point.translation.distance_squared(transform.translation) > 0.01
-            });
-
-            if should_add_point {
+        // Debug motion tracking
+        if let Some(debug_motion) = debug_motion.as_mut() {
+            if debug_mode
+                || debug_motion.points.back().map_or(true, |(_, point)| {
+                    point.translation.distance_squared(transform.translation) > 0.01
+                })
+            {
                 let mut point = transform.translation;
                 point += feet_position(
                     collider,
@@ -899,6 +875,14 @@ pub(crate) fn move_character_three_pass(
     }
 }
 
+// Enhanced result struct to track PhysX-style state
+#[derive(Debug, Clone)]
+struct PassResult {
+    had_collision: bool,
+    hit_static_geometry: bool,
+    contact_normal: Option<Vec3>,
+}
+
 fn execute_pass(
     movement_state: &mut MovementState,
     motion_vector: Vec3,
@@ -911,77 +895,58 @@ fn execute_pass(
     spatial_query: &SpatialQuery,
     stepping_config: Option<&SteppingConfig>,
     grounding_config: Option<&GroundingConfig>,
-    is_character_grounded: bool, // NEW PARAMETER
     debug_config: &MovementDebugConfig,
-) -> () {
+) -> PassResult {
+    // Use live ground state from movement_state (updated during passes)
     let current_ground_normal = movement_state.ground.map(|g| g.normal);
+    let is_currently_grounded = movement_state.ground.is_some();
 
     debug_log!(
         debug_config,
-        "  Execute pass {:?}: motion_vector={:?}, current_ground={:?}, character_grounded={}",
+        "  Execute pass {:?}: motion_vector={:?}, current_ground={:?}",
         pass_type,
         motion_vector,
-        current_ground_normal,
-        is_character_grounded
-    );
-    debug_log!(
-        debug_config,
-        "  Pre-pass state: pos={:?}, vel={:?}, remaining_time={:.3}",
-        movement_state.position,
-        movement_state.velocity,
-        movement_state.remaining_time
+        current_ground_normal
     );
 
     let config = match pass_type {
         PassType::Up => CollideAndSlideConfig {
             max_iterations: 1,
-            ..collide_and_slide_config.clone()
+            ..*collide_and_slide_config
         },
         PassType::Side => CollideAndSlideConfig {
             max_iterations: 4,
-            ..collide_and_slide_config.clone()
+            ..*collide_and_slide_config
         },
         PassType::Down => CollideAndSlideConfig {
             max_iterations: 1,
-            ..collide_and_slide_config.clone()
+            ..*collide_and_slide_config
         },
     };
 
-    let original_position = movement_state.position;
-    let original_remaining_time = movement_state.remaining_time;
+    // motion_vector is already the displacement we want to move
+    let motion_displacement = motion_vector;
+    
+    debug_log!(debug_config, "  Motion displacement: {:?} (magnitude: {:.6})", 
+              motion_displacement, motion_displacement.length());
 
     let result = collide_and_slide(
         collider,
         movement_state.position,
         transform_rotation,
-        motion_vector,
+        motion_displacement, // This is the displacement we want to move
         current_ground_normal,
         &config,
         filter,
         spatial_query,
-        movement_state.remaining_time,
-        is_character_grounded, // NEW PARAMETER
-        character.up.into(),   // NEW PARAMETER
-        |velocity, surface| {
-            let projected = match pass_type {
-                PassType::Up => velocity.reject_from(*surface.normal),
-                PassType::Side => {
-                    surface.project_velocity(velocity, current_ground_normal, character.up)
-                }
-                PassType::Down => {
-                    surface.project_velocity(velocity, current_ground_normal, character.up)
-                }
-            };
-            debug_log!(
-                debug_config,
-                "    Velocity projection in {:?} pass: {:?} -> {:?} (surface normal: {:?}, walkable: {})",
-                pass_type,
-                velocity,
-                projected,
-                surface.normal,
-                surface.is_walkable
-            );
-            projected
+        1.0, // delta=1.0 since motion_displacement is already in world units
+        is_currently_grounded,
+        character.up.into(),
+        |velocity, surface| match pass_type {
+            PassType::Up => velocity.reject_from(*surface.normal),
+            PassType::Side | PassType::Down => {
+                surface.project_velocity(velocity, current_ground_normal, character.up)
+            }
         },
         |state, impact| {
             let surface = Surface::new(
@@ -989,41 +954,23 @@ fn execute_pass(
                 grounding_config.map_or(std::f32::consts::FRAC_PI_4, |g| g.max_angle),
                 character.up,
             );
-
-            debug_log!(
-                debug_config,
-                "    Collision in {:?} pass: hit_normal={:?}, walkable={}, distance={:.3}",
-                pass_type,
-                impact.hit.normal,
-                surface.is_walkable,
-                impact.hit.distance
-            );
-
             Some(surface)
         },
         debug_config,
     );
 
-    debug_log!(
-        debug_config,
-        "  Collide_and_slide result: offset={:?}, velocity={:?}, remaining_time={:.3}",
-        result.offset,
-        result.velocity,
-        result.remaining_time
-    );
-
-    // Update movement state with results from collide_and_slide
+    // Update movement state with results
     movement_state.position += result.offset;
-    movement_state.remaining_time = result.remaining_time;
+    // Don't update remaining_time since we're not using time-based integration
 
-    // ALWAYS use the collision result velocity - this is critical for proper stepping behavior
-    movement_state.velocity = result.velocity;
-    debug_log!(
-        debug_config,
-        "  Using collision result velocity: {:?}",
-        result.velocity
-    );
+    // Track collision results
+    let mut pass_result = PassResult {
+        had_collision: false,
+        hit_static_geometry: false,
+        contact_normal: None,
+    };
 
+    // Ground comes from sweep results
     if let Some(ground) = result.ground {
         debug_log!(
             debug_config,
@@ -1032,31 +979,16 @@ fn execute_pass(
             ground
         );
         movement_state.ground = Some(ground);
+        pass_result.had_collision = true;
+        pass_result.hit_static_geometry = true;
+        pass_result.contact_normal = Some(*ground.normal);
     }
 
-    let actual_distance_moved = (movement_state.position - original_position).length();
-    let expected_distance = motion_vector.length() * original_remaining_time;
-    let collision_detected = actual_distance_moved < expected_distance * 0.99;
-
-    debug_log!(
-        debug_config,
-        "  Post-pass state: pos={:?}, vel={:?}, remaining_time={:.3}",
-        movement_state.position,
-        movement_state.velocity,
-        movement_state.remaining_time
-    );
-    debug_log!(
-        debug_config,
-        "  Distance: moved={:.3}, expected={:.3}, collision={}",
-        actual_distance_moved,
-        expected_distance,
-        collision_detected
-    );
-
-    ()
+    pass_result
 }
 
-/// Triggered when the character becomes grounded during a movement update.
+
+// Rest of the structs and functions remain the same...
 #[derive(Component, Reflect, Debug, Clone, Copy)]
 #[reflect(Component, Default)]
 #[require(
@@ -1072,7 +1004,6 @@ fn execute_pass(
     MoveInput,
 )]
 pub struct Character {
-    // Not sure if this should be here or in GroundingConfig
     pub up: Dir3,
 }
 
@@ -1082,12 +1013,10 @@ impl Default for Character {
     }
 }
 
-/// The velocity of a character.
 #[derive(Component, Reflect, Debug, Default, Clone, Copy, Deref, DerefMut)]
 #[reflect(Component)]
 pub struct KinematicVelocity(pub Vec3);
 
-/// Cache the [`SpatialQueryFilter`] of the character to avoid re-allocating the excluded entities map every time it's used.
 #[derive(Component, Reflect, Default, Debug)]
 #[reflect(Component)]
 pub struct CollideAndSlideFilter(pub(crate) SpatialQueryFilter);

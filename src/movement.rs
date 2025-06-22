@@ -25,11 +25,7 @@ pub(crate) fn character_gravity(
     )>,
     time: Res<Time>,
 ) {
-    for (mut velocity, character_gravity, grounding, gravity_scale) in &mut query {
-        if grounding.map_or(false, |g| g.is_grounded()) {
-            continue;
-        }
-
+    for (mut velocity, character_gravity, _, gravity_scale) in &mut query {
         let mut gravity = character_gravity.map_or(default_gravity.0, |g| g.0);
 
         if let Some(gravity_scale) = gravity_scale {
