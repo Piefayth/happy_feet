@@ -217,7 +217,7 @@ fn setup(
             CharacterFriction::default(),
             CharacterDrag::default(),
             SteppingConfig {
-                max_step_up: 0.4,
+                max_step_up: 0.5,
                 ..Default::default()
             },
             SteppingBehaviour::Always,
