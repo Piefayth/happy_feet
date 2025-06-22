@@ -150,16 +150,10 @@ pub(crate) fn project_velocity(
             // Align the velocity to the surface while maintaining the horizontal direction
             align_with_surface(velocity, obstruction_normal, *up_direction)
         }
-        // Character on ground, moving to non-walkable surface
-        (Some(ground_normal), false) => {
-            // Calculate the right vector along the intersection of ground and obstruction
-            let ground_right = obstruction_normal.cross(*ground_normal).normalize_or_zero();
-
-            // Calculate the up vector along the ground that's perpendicular to obstruction
-            let ground_up = ground_right.cross(obstruction_normal).normalize_or_zero();
-
-            // Align with the ground and slide along the obstruction
-            align_with_surface(velocity, ground_up, *up_direction).reject_from(obstruction_normal)
+        // Character on ground, moving to non-walkable surface - SLIDE ONLY
+        (Some(_ground_normal), false) => {
+            // Just slide along the wall - stepping happens through position displacement
+            velocity.reject_from(obstruction_normal)
         }
         // Character in air, hitting walkable surface
         (None, true) => {

@@ -4,7 +4,7 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 
 use crate::{
-    CollideAndSlideFilter, CollisionState, ground::Ground, projection::Surface,
+    debug_log, ground::Ground, projection::Surface, CollideAndSlideFilter, CollisionState, MovementDebugConfig
 };
 
 #[derive(Reflect, Debug, Clone, Copy)]
@@ -88,7 +88,6 @@ impl Default for CollideAndSlideConfig {
     }
 }
 
-/// If `on_hit` returns `true`, `project_velocity` will be called and the state velocity will be modified, otherwise it will be skipped.
 pub(crate) fn collide_and_slide(
     shape: &Collider,
     origin: Vec3,
@@ -101,6 +100,7 @@ pub(crate) fn collide_and_slide(
     delta: f32,
     mut project_velocity: impl FnMut(Vec3, Surface) -> Vec3,
     mut on_hit: impl FnMut(&mut MovementState, MovementImpact) -> Option<Surface>,
+    debug_config: &MovementDebugConfig,
 ) -> MovementState {
     let mut state = MovementState {
         velocity,
@@ -110,17 +110,23 @@ pub(crate) fn collide_and_slide(
     };
 
     let mut previous_velocity = state.velocity;
-
     let mut collision_state = CollisionState::default();
 
-    for _ in 0..config.max_iterations {
+    debug_log!(debug_config, "    Collide_and_slide START: velocity={:?}, delta={:.3}, max_iter={}", 
+          velocity, delta, config.max_iterations);
+
+    for iteration in 0..config.max_iterations {
         let Ok((direction, max_distance)) =
             Dir3::new_and_length(state.velocity * state.remaining_time)
         else {
+            debug_log!(debug_config, "      Iteration {}: No movement needed (zero velocity)", iteration);
             break;
         };
 
         let start = origin + state.offset;
+
+        debug_log!(debug_config, "      Iteration {}: direction={:?}, max_distance={:.3}, start={:?}", 
+              iteration, direction, max_distance, start);
 
         let Some(hit) = sweep(
             shape,
@@ -133,12 +139,18 @@ pub(crate) fn collide_and_slide(
             filter,
             true,
         ) else {
+            debug_log!(debug_config, "      Iteration {}: No collision, moving full distance", iteration);
             state.offset += direction * max_distance;
             break;
         };
 
-        state.remaining_time *= 1.0 - hit.distance / max_distance;
+        let time_consumed = hit.distance / max_distance;
+        state.remaining_time *= 1.0 - time_consumed;
         state.offset += direction * hit.distance;
+
+        debug_log!(debug_config, "      Iteration {}: HIT at distance={:.3}, normal={:?}, entity={:?}", 
+              iteration, hit.distance, hit.normal, hit.entity);
+        debug_log!(debug_config, "      Time consumed: {:.3}, remaining: {:.3}", time_consumed, state.remaining_time);
 
         let impact = MovementImpact {
             start,
@@ -149,21 +161,64 @@ pub(crate) fn collide_and_slide(
         };
 
         let Some(surface) = on_hit(&mut state, impact) else {
+            debug_log!(debug_config, "      Iteration {}: on_hit returned None, continuing", iteration);
             continue;
         };
 
         if surface.is_walkable {
+            debug_log!(debug_config, "      Iteration {}: Setting walkable ground", iteration);
             state.ground = Some(Ground::new(hit.entity, hit.normal));
         }
 
+        // *** KEY CHANGE: Handle stepping through position displacement, not velocity ***
+        let blocked_velocity = state.velocity.dot(hit.normal);
+        
+        // For stepping, assume grounded if we have horizontal velocity (typical grounded movement)
+        let horizontal_speed = state.velocity.reject_from(Vec3::Y).length();
+        let is_likely_grounded = horizontal_speed > 1.0; // Character moving horizontally = likely grounded
+        let is_moving_into_wall = blocked_velocity < 0.0;
+        
+        debug_log!(debug_config, "      Iteration {}: blocked_velocity={:.3}, is_likely_grounded={}, is_moving_into_wall={}", 
+                  iteration, blocked_velocity, is_likely_grounded, is_moving_into_wall);
+        
+        if !surface.is_walkable && is_likely_grounded && is_moving_into_wall {
+            // STEPPING: Add upward position displacement instead of changing velocity
+            let blocked_speed = blocked_velocity.abs();
+            let step_height = blocked_speed * delta * 0.5; // Convert blocked velocity to step height
+            
+            debug_log!(debug_config, "      Iteration {}: STEPPING - blocked_speed={:.3}, step_height={:.3}", 
+                      iteration, blocked_speed, step_height);
+            
+            // Add upward displacement for stepping
+            let up_direction = Vec3::Y; // or get from character
+            state.offset += up_direction * step_height;
+        }
+
+        let velocity_before_projection = state.velocity;
+        
         state.velocity = collision_state.update(
             surface,
             state.velocity,
             mem::replace(&mut previous_velocity, state.velocity),
             current_ground_normal.is_some(),
-            |vel| project_velocity(vel, surface),
+            |vel| {
+                let projected = project_velocity(vel, surface);
+                debug_log!(debug_config, "        Velocity projection: {:?} -> {:?}", vel, projected);
+                projected
+            },
         );
+
+        debug_log!(debug_config, "      Iteration {}: Velocity after collision_state.update: {:?} -> {:?}", 
+              iteration, velocity_before_projection, state.velocity);
+        
+        if state.velocity.length_squared() < 1e-6 {
+            debug_log!(debug_config, "      Iteration {}: Velocity too small, stopping", iteration);
+            break;
+        }
     }
+
+    debug_log!(debug_config, "    Collide_and_slide END: final_offset={:?}, final_velocity={:?}, remaining_time={:.3}", 
+          state.offset, state.velocity, state.remaining_time);
 
     state
 }
