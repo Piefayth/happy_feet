@@ -627,7 +627,7 @@ fn execute_movement_attempt(
     }
 
     // PhysX Constrained Climbing Check (only in main attempt, not retry)
-    if !is_walk_experiment && movement_state.validate_triangle_side {
+    if !is_walk_experiment && movement_state.validate_triangle_side && !is_moving_up {
         let max_slope_angle = grounding_config.map_or(std::f32::consts::FRAC_PI_4, |g| g.max_angle);
         let slope_is_unwalkable = !is_walkable(
             movement_state.contact_normal_side_pass,
