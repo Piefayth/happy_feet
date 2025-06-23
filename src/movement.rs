@@ -322,25 +322,3 @@ pub(crate) fn friction_factor(velocity: Vec3, friction: f32, delta: f32) -> f32 
 
     f32::exp(-friction / speed_sq.sqrt() * delta)
 }
-
-/// Factors controlling braking behavior in different directions.
-#[derive(Reflect, Default, Debug, Clone, Copy)]
-pub struct BrakeFactor {
-    /// Slow down backward motion when moving against the input direction.
-    pub reverse: f32,
-    /// Reduce lateral/sideways motion when.
-    pub lateral: f32,
-}
-
-impl BrakeFactor {
-    pub const ZERO: Self = Self::all(0.0);
-
-    pub const ONE: Self = Self::all(1.0);
-
-    pub const fn all(value: f32) -> Self {
-        Self {
-            reverse: value,
-            lateral: value,
-        }
-    }
-}

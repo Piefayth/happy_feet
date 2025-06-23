@@ -65,6 +65,7 @@ impl SweepPass {
 pub struct MovementState {
     pub current_position: Vec3,
     pub target_orientation: Vec3,
+    pub up: Dir3,
     pub ground: Option<Ground>,
     pub collision_flags: u32,
     pub validate_triangle_down: bool,
@@ -76,6 +77,7 @@ pub struct MovementState {
     pub walk_experiment: bool,
     pub touched_tri_min: f32,
     pub touched_tri_max: f32,
+    pub prevent_vertical_motion: bool,
 }
 
 impl MovementState {
@@ -83,6 +85,7 @@ impl MovementState {
         Self {
             current_position: position,
             target_orientation: position,
+            up: Dir3::Y,
             ground: None,
             collision_flags: 0,
             validate_triangle_down: false,
@@ -94,6 +97,7 @@ impl MovementState {
             walk_experiment: false,
             touched_tri_min: 0.0,
             touched_tri_max: 0.0,
+            prevent_vertical_motion: false
         }
     }
 
@@ -232,6 +236,16 @@ pub fn execute_sweep_pass(
                     state.validate_triangle_side = true;
                     state.contact_normal_side_pass = hit.normal;
                     state.contact_point_height = hit.point.dot(*up_direction);
+
+                        debug_log!(
+        debug_config,
+        "    {} SIDE HIT: normal={:?}, hit_point={:?}, contact_height={:.6}, character_pos={:?}",
+        pass_label,
+        hit.normal,
+        hit.point,
+        hit.point.dot(*up_direction),
+        state.current_position
+    );
                 }
                 SweepPass::Up => {
                     // Up pass doesn't need special grounding handling
@@ -261,46 +275,40 @@ fn physx_collision_response(
     current_direction: Vec3,
     hit_normal: Vec3,
 ) {
-    // Calculate original amplitude for scaling
     let amplitude = (state.target_orientation - state.current_position).length();
 
     if amplitude < 1e-6 {
         return;
     }
 
-    // PhysX computeReflexionVector: reflect = incoming - normal * 2 * dot(incoming, normal)
-    let reflect_dir = current_direction - hit_normal * 2.0 * current_direction.dot(hit_normal);
-    let reflect_dir = reflect_dir.normalize_or_zero();
+    let mut effective_normal = hit_normal;
 
-    // PhysX decomposeVector: split reflection into normal and tangent components relative to hit normal
-    let normal_component = reflect_dir.project_onto(hit_normal);
-    let tangent_component = reflect_dir - normal_component;
-
-    // PhysX parameters (from C++ code)
-    let bump = 0.0; // PhysX uses 0.0 - no bouncing away from surface
-    let friction = 1.0; // PhysX uses 1.0 - full sliding along surface
-    let normalize = false; // PhysX usually uses false
-
-    // PhysX behavior: reset target to current position first
-    state.target_orientation = state.current_position;
-
-    // Add bump component (usually zero, so usually no effect)
-    if bump != 0.0 {
-        let normal_to_add = if normalize {
-            normal_component.normalize_or_zero()
+    // PhysX: Modify collision normal when prevent_vertical_motion flag is set
+    if state.prevent_vertical_motion {
+        // Remove vertical component from collision normal
+        let normal_component = hit_normal.project_onto(state.up.into());
+        let tangent_component = hit_normal - normal_component;
+        
+        if tangent_component.length_squared() > 1e-6 {
+            effective_normal = tangent_component.normalize();
         } else {
-            normal_component
-        };
-        state.target_orientation += normal_to_add * bump * amplitude;
+            state.target_orientation = state.current_position;
+            return;
+        }
     }
 
-    // Add friction component (this is the sliding motion along the surface)
+    // Rest is exactly the same as before
+    let reflect_dir = current_direction - effective_normal * 2.0 * current_direction.dot(effective_normal);
+    let reflect_dir = reflect_dir.normalize_or_zero();
+
+    let normal_component = reflect_dir.project_onto(effective_normal);
+    let tangent_component = reflect_dir - normal_component;
+
+    let friction = 1.0;
+
+    state.target_orientation = state.current_position;
+
     if friction != 0.0 {
-        let tangent_to_add = if normalize {
-            tangent_component.normalize_or_zero()
-        } else {
-            tangent_component
-        };
-        state.target_orientation += tangent_to_add * friction * amplitude;
+        state.target_orientation += tangent_component * friction * amplitude;
     }
 }

@@ -2,6 +2,20 @@ use std::{f32::consts::PI, fmt::Debug};
 
 use bevy::prelude::*;
 
+#[derive(Reflect, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NonWalkableMode {
+    /// Prevent climbing, use normal collision response (PhysX default)
+    PreventClimbing,
+    /// Prevent climbing and force sliding along the slope base
+    PreventClimbingAndForceSliding,
+}
+
+impl Default for NonWalkableMode {
+    fn default() -> Self {
+        Self::PreventClimbing
+    }
+}
+
 #[derive(Component, Reflect, Debug, Clone, Copy)]
 #[reflect(Component, Default)]
 #[require(Grounding)]
@@ -11,6 +25,8 @@ pub struct GroundingConfig {
     /// Max distance from the ground
     pub max_distance: f32,
     pub snap_to_surface: bool,
+    /// How to handle non-walkable surfaces (slopes too steep to climb)
+    pub non_walkable_mode: NonWalkableMode,
 }
 
 impl Default for GroundingConfig {
@@ -19,10 +35,10 @@ impl Default for GroundingConfig {
             max_angle: PI / 4.0,
             max_distance: 0.2,
             snap_to_surface: true,
+            non_walkable_mode: NonWalkableMode::PreventClimbing,
         }
     }
 }
-
 /// The ground state of a character.
 #[derive(Component, Reflect, Default, Debug, PartialEq, Clone, Copy)]
 #[reflect(Component, Default)]

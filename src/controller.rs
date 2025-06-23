@@ -3,12 +3,14 @@ use bevy::prelude::*;
 
 use crate::{
     Character,
-    collision::{CharacterCollisionFlags, CharacterMoveResult, MovementState, SweepPass, execute_sweep_pass},
-    debug::{MovementDebugConfig},
-    ground::{Ground, GroundingConfig},
+    collision::{
+        CharacterCollisionFlags, CharacterMoveResult, MovementState, SweepPass, execute_sweep_pass,
+    },
+    debug::MovementDebugConfig,
+    debug_log,
+    ground::{Ground, GroundingConfig, NonWalkableMode},
     stepping::{SteppingBehaviour, SteppingConfig},
-    sweep::{CollideAndSlideConfig},
-    debug_log
+    sweep::{CollideAndSlideConfig, SweepHitData},
 };
 
 /// A simple character controller data structure for movement calculations.
@@ -80,20 +82,25 @@ impl<'a> CharacterController<'a> {
 
         // Determine if we should auto-step based on grounding and movement
         let is_grounded = self.current_ground.is_some();
-        let should_auto_step = match &self.stepping_config {
+
+        // PhysX logic: Don't auto-step when moving up (jumping) or when not moving horizontally
+        let basic_auto_step_allowed = match &self.stepping_config {
             Some((_, SteppingBehaviour::Never)) => false,
             Some((_, SteppingBehaviour::Always)) => true,
             Some((_, SteppingBehaviour::Grounded)) => is_grounded,
             None => false,
         };
 
-        let auto_step_offset = if is_moving_up || !should_auto_step {
-            0.0
-        } else {
+        // PhysX constraint: Cancel auto-step when moving upward (unless on moving platform)
+        let should_auto_step = basic_auto_step_allowed && has_horizontal_motion && !is_moving_up; // This is the key PhysX logic!
+
+        let auto_step_offset = if should_auto_step {
             self.stepping_config
                 .as_ref()
                 .map(|(config, _)| config.max_step_up)
                 .unwrap_or(0.0)
+        } else {
+            0.0
         };
 
         let slope_validation_step_offset = self
@@ -104,13 +111,15 @@ impl<'a> CharacterController<'a> {
 
         debug_log!(
             self.debug_config,
-            "Movement analysis: horizontal={:?}, vertical={:?}, is_moving_up={}, should_auto_step={}",
+            "Movement analysis: horizontal={:?}, vertical={:?}, is_moving_up={}, should_auto_step={}, auto_step_offset={}",
             horizontal_component,
             vertical_component,
             is_moving_up,
-            should_auto_step
+            should_auto_step,
+            auto_step_offset
         );
 
+        // Continue with the rest of the movement logic...
         let mut final_movement_state = self.execute_movement_attempt(
             desired_displacement,
             auto_step_offset,
@@ -128,21 +137,36 @@ impl<'a> CharacterController<'a> {
                 "WALK EXPERIMENT: Hit unwalkable surface, retrying movement..."
             );
 
-            let (vertical_disp, horizontal_disp) =
-                decompose_displacement(desired_displacement, self.character.up);
-
-            let height_after_failed_move = final_movement_state
-                .current_position
-                .dot(*self.character.up);
-            let height_gained = (height_after_failed_move - original_height).max(0.0);
-            let recovery_distance = height_gained + vertical_disp.length();
-            let recovery_vector = -*self.character.up * recovery_distance;
-            let modified_displacement = horizontal_disp + recovery_vector;
+            // PhysX-style displacement modification based on non-walkable mode
+            let modified_displacement = match self
+                .grounding_config
+                .as_ref()
+                .map(|g| g.non_walkable_mode)
+                .unwrap_or(NonWalkableMode::PreventClimbing)
+            {
+                NonWalkableMode::PreventClimbingAndForceSliding => {
+                    // Use only horizontal component - removes all vertical climbing
+                    debug_log!(
+                        self.debug_config,
+                        "WALK EXPERIMENT: Using horizontal-only displacement (force sliding mode)"
+                    );
+                    horizontal_component
+                }
+                NonWalkableMode::PreventClimbing => {
+                    // Use original displacement with modified collision response
+                    debug_log!(
+                        self.debug_config,
+                        "WALK EXPERIMENT: Using original displacement (prevent climbing mode)"
+                    );
+                    desired_displacement
+                }
+            };
 
             debug_log!(
                 self.debug_config,
-                "WALK EXPERIMENT: Modified displacement: {:?}",
-                modified_displacement
+                "WALK EXPERIMENT: Modified displacement: {:?} (was: {:?})",
+                modified_displacement,
+                desired_displacement
             );
 
             let retry_result = self.execute_movement_attempt(
@@ -150,8 +174,8 @@ impl<'a> CharacterController<'a> {
                 auto_step_offset,
                 slope_validation_step_offset,
                 has_horizontal_motion,
-                false, // for retry, we are moving down
-                true,  // is_walk_experiment
+                modified_displacement.dot(*self.character.up) > 0.0, // Check if retry is moving up
+                true,                                                // is_walk_experiment
                 original_bottom_point,
             );
 
@@ -322,6 +346,7 @@ impl<'a> CharacterController<'a> {
         // PASS 2: SIDE
         if let Some(side_motion) = side_vector {
             movement_state.target_orientation = movement_state.current_position + side_motion;
+            movement_state.prevent_vertical_motion = is_walk_experiment;
 
             let had_collision = execute_sweep_pass(
                 &mut movement_state,
@@ -345,30 +370,33 @@ impl<'a> CharacterController<'a> {
         }
 
         // Side collision slope validation
-        if !is_walk_experiment && movement_state.validate_triangle_side {
-            let max_slope_angle = self
-                .grounding_config
-                .as_ref()
-                .map_or(std::f32::consts::FRAC_PI_4, |g| g.max_angle);
-            let slope_is_unwalkable = test_slope(
-                movement_state.contact_normal_side_pass,
-                *self.character.up,
-                max_slope_angle,
-            );
+    if !is_walk_experiment && !is_moving_up && movement_state.validate_triangle_side {
+        let max_slope_angle = self
+            .grounding_config
+            .as_ref()
+            .map_or(std::f32::consts::FRAC_PI_4, |g| g.max_angle);
 
-            if slope_is_unwalkable {
-                let height_gained_too_much = movement_state.contact_point_height
-                    > original_bottom_point + slope_validation_step_offset;
+        let slope_is_unwalkable = test_slope(
+            movement_state.contact_normal_side_pass,
+            *self.character.up,
+            max_slope_angle,
+        );
 
-                if height_gained_too_much {
-                    movement_state.hit_non_walkable = true;
-                    debug_log!(
-                        self.debug_config,
-                        "Constrained Climbing: Hit unwalkable side surface and gained too much height"
-                    );
-                }
+        if slope_is_unwalkable {
+            let start_height = self.position.dot(*self.character.up);
+            let current_height = movement_state.current_position.dot(*self.character.up);
+            let height_gained = current_height - start_height;
+            
+            if height_gained > 1e-6 {
+                movement_state.hit_non_walkable = true;
+                debug_log!(
+                    self.debug_config,
+                    "HIT NON-WALKABLE: Gained height ({:.6}) while sliding on an unwalkable slope. Triggering walk experiment.",
+                    height_gained
+                );
             }
         }
+    }
 
         // PASS 3: DOWN
         let down_motion = if !is_moving_up {
