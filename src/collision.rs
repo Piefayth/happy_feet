@@ -2,7 +2,10 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 
 use crate::{
-    debug::MovementDebugConfig, debug_log, ground::{is_walkable, Ground, GroundingConfig}, sweep::{sweep, SweepHitData}
+    debug::MovementDebugConfig,
+    debug_log,
+    ground::{Ground, GroundingConfig, is_walkable},
+    sweep::{SweepHitData, sweep},
 };
 
 /// Collision flags returned by character movement, matching PhysX API
@@ -54,7 +57,7 @@ impl SweepPass {
     pub fn name(&self) -> &'static str {
         match self {
             SweepPass::Up => "UP",
-            SweepPass::Side => "SIDE", 
+            SweepPass::Side => "SIDE",
             SweepPass::Down => "DOWN",
         }
     }
@@ -78,6 +81,7 @@ pub struct MovementState {
     pub touched_tri_min: f32,
     pub touched_tri_max: f32,
     pub prevent_vertical_motion: bool,
+    pub normalize_response: bool,
 }
 
 impl MovementState {
@@ -97,7 +101,8 @@ impl MovementState {
             walk_experiment: false,
             touched_tri_min: 0.0,
             touched_tri_max: 0.0,
-            prevent_vertical_motion: false
+            prevent_vertical_motion: false,
+            normalize_response: true,
         }
     }
 
@@ -140,11 +145,7 @@ pub fn execute_sweep_pass(
     let original_direction = if let Some((dir, _)) = state.current_direction() {
         *dir
     } else {
-        debug_log!(
-            debug_config,
-            "  {} PASS: No movement needed",
-            pass_label
-        );
+        debug_log!(debug_config, "  {} PASS: No movement needed", pass_label);
         return false;
     };
 
@@ -215,6 +216,36 @@ pub fn execute_sweep_pass(
         let safe_distance = hit.distance.max(0.0);
         state.current_position += *current_direction * safe_distance;
 
+        let mut effective_normal = hit.normal;
+
+        // Key PhysX walk experiment logic: flatten collision normal during walk experiment
+        if state.walk_experiment || state.prevent_vertical_motion {
+            // This is the exact PhysX behavior:
+            // "cancel out normal compo" - remove the vertical component from the collision normal
+            let normal_component = hit.normal.project_onto(*up_direction);
+            let tangent_component = hit.normal - normal_component;
+
+            if tangent_component.length_squared() > 1e-6 {
+                effective_normal = tangent_component.normalize();
+
+                debug_log!(
+                    debug_config,
+                    "    {} WALK EXPERIMENT: Flattened collision normal from {:?} to {:?}",
+                    pass_label,
+                    hit.normal,
+                    effective_normal
+                );
+            } else {
+                // If tangent component is too small, use a safe fallback
+                effective_normal = Vec3::ZERO;
+                debug_log!(
+                    debug_config,
+                    "    {} WALK EXPERIMENT: Normal completely vertical, using zero normal",
+                    pass_label
+                );
+            }
+        }
+
         // Handle collision based on pass type and grounding configuration
         if let Some(grounding_config) = grounding_config {
             match pass_type {
@@ -226,7 +257,7 @@ pub fn execute_sweep_pass(
                         let ground = Ground::new(hit.entity, hit.normal);
                         state.ground = Some(ground);
                     }
-                    
+
                     // PhysX triangle height tracking for slope validation
                     let cache_center_y = state.current_position.dot(*up_direction);
                     state.touched_tri_min = hit.point.dot(*up_direction) - cache_center_y;
@@ -237,15 +268,15 @@ pub fn execute_sweep_pass(
                     state.contact_normal_side_pass = hit.normal;
                     state.contact_point_height = hit.point.dot(*up_direction);
 
-                        debug_log!(
-        debug_config,
-        "    {} SIDE HIT: normal={:?}, hit_point={:?}, contact_height={:.6}, character_pos={:?}",
-        pass_label,
-        hit.normal,
-        hit.point,
-        hit.point.dot(*up_direction),
-        state.current_position
-    );
+                    debug_log!(
+                        debug_config,
+                        "    {} SIDE HIT: normal={:?}, hit_point={:?}, contact_height={:.6}, character_pos={:?}",
+                        pass_label,
+                        hit.normal,
+                        hit.point,
+                        hit.point.dot(*up_direction),
+                        state.current_position
+                    );
                 }
                 SweepPass::Up => {
                     // Up pass doesn't need special grounding handling
@@ -254,7 +285,17 @@ pub fn execute_sweep_pass(
         }
 
         // PhysX collision response - modify target_orientation for next iteration
-        physx_collision_response(state, *current_direction, hit.normal);
+        if effective_normal.length_squared() > 1e-6 {
+            physx_collision_response(state, *current_direction, effective_normal);
+        } else {
+            // If normal is zero (completely vertical), stop all movement
+            state.target_orientation = state.current_position;
+            debug_log!(
+                debug_config,
+                "    {} No collision response - zero effective normal",
+                pass_label
+            );
+        }
     }
 
     debug_log!(
@@ -268,47 +309,43 @@ pub fn execute_sweep_pass(
     had_collision
 }
 
-/// PhysX-style collision response that modifies the target orientation
-/// This is the core collision response algorithm from PhysX CCT
-fn physx_collision_response(
-    state: &mut MovementState,
-    current_direction: Vec3,
-    hit_normal: Vec3,
-) {
+fn physx_collision_response(state: &mut MovementState, current_direction: Vec3, hit_normal: Vec3) {
     let amplitude = (state.target_orientation - state.current_position).length();
 
     if amplitude < 1e-6 {
         return;
     }
 
-    let mut effective_normal = hit_normal;
-
-    // PhysX: Modify collision normal when prevent_vertical_motion flag is set
-    if state.prevent_vertical_motion {
-        // Remove vertical component from collision normal
-        let normal_component = hit_normal.project_onto(state.up.into());
-        let tangent_component = hit_normal - normal_component;
-        
-        if tangent_component.length_squared() > 1e-6 {
-            effective_normal = tangent_component.normalize();
-        } else {
-            state.target_orientation = state.current_position;
-            return;
-        }
-    }
-
-    // Rest is exactly the same as before
-    let reflect_dir = current_direction - effective_normal * 2.0 * current_direction.dot(effective_normal);
+    // Compute reflect direction (PhysX: computeReflexionVector)
+    let reflect_dir = current_direction - hit_normal * 2.0 * current_direction.dot(hit_normal);
     let reflect_dir = reflect_dir.normalize_or_zero();
 
-    let normal_component = reflect_dir.project_onto(effective_normal);
+    // Decompose reflection into normal and tangent components (PhysX: Ps::decomposeVector)
+    let normal_component = reflect_dir.project_onto(hit_normal);
     let tangent_component = reflect_dir - normal_component;
 
-    let friction = 1.0;
+    // PhysX constants
+    let bump = 0.0; // PhysX always uses 0.0 for bump
+    let friction = 1.0; // PhysX always uses 1.0 for friction
 
+    // Reset target to current position (PhysX behavior)
     state.target_orientation = state.current_position;
 
+    // Apply bump component (usually zero in PhysX)
+    if bump != 0.0 {
+        let mut bump_component = normal_component;
+        if state.normalize_response {
+            bump_component = bump_component.normalize_or_zero();
+        }
+        state.target_orientation += bump_component * bump * amplitude;
+    }
+
+    // Apply friction component (tangential movement)
     if friction != 0.0 {
-        state.target_orientation += tangent_component * friction * amplitude;
+        let mut friction_component = tangent_component;
+        if state.normalize_response {
+            friction_component = friction_component.normalize_or_zero();
+        }
+        state.target_orientation += friction_component * friction * amplitude;
     }
 }

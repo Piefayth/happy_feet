@@ -215,16 +215,11 @@ impl<'a> CharacterController<'a> {
         initial_velocity: Vec3,
         move_result: &CharacterMoveResult,
     ) -> Vec3 {
-        let (mut vertical_velocity, horizontal_velocity) =
+        let (mut vertical_velocity, mut horizontal_velocity) =
             decompose_velocity(initial_velocity, self.character.up);
 
         // Handle landing: zero downward velocity when we land normally
-        // Key insight: Don't zero velocity if hit_non_walkable is true (sliding case)
-        if move_result.ground.is_some()
-            && vertical_velocity.dot(*self.character.up) <= 0.0
-            && !move_result.hit_non_walkable
-        // This is the crucial condition!
-        {
+        if move_result.ground.is_some() && vertical_velocity.dot(*self.character.up) <= 0.0 {
             vertical_velocity = Vec3::ZERO;
             debug_log!(
                 self.debug_config,
@@ -237,6 +232,67 @@ impl<'a> CharacterController<'a> {
         if move_result.collision_flags.up && vertical_velocity.dot(*self.character.up) > 0.0 {
             vertical_velocity = Vec3::ZERO;
             debug_log!(self.debug_config, "Ceiling hit: removed upward velocity");
+        }
+
+        // CRITICAL PhysX behavior: Handle non-walkable surface collisions
+        if move_result.hit_non_walkable {
+            debug_log!(
+                self.debug_config,
+                "Hit non-walkable surface - checking if this was gravity-induced motion"
+            );
+
+            // The key insight: we need to distinguish between player-intended motion
+            // and gravity-induced motion that got redirected horizontally.
+
+            // If the character has significant horizontal velocity but very little
+            // horizontal displacement occurred, it means the walk experiment
+            // prevented the unwanted motion - we should reduce velocity accordingly.
+
+            let horizontal_speed = horizontal_velocity.length();
+            let horizontal_displacement = {
+                let horizontal_actual = move_result
+                    .actual_displacement
+                    .reject_from(*self.character.up);
+                horizontal_actual.length()
+            };
+
+            // If we had horizontal velocity but achieved little horizontal movement,
+            // it means we hit a steep slope and the walk experiment stopped us
+            if horizontal_speed > 0.5 && horizontal_displacement < horizontal_speed * 0.2 {
+                // This indicates gravity-induced motion that was blocked
+                // Reduce horizontal velocity significantly to prevent sliding
+                horizontal_velocity *= 0.1;
+                debug_log!(
+                    self.debug_config,
+                    "Detected blocked motion on non-walkable surface - reduced horizontal velocity to {:?}",
+                    horizontal_velocity
+                );
+            }
+        }
+
+        // Handle side collisions: reduce velocity in collision direction
+        if move_result.collision_flags.sides {
+            // If we hit a wall but it's not a steep slope (i.e., normal ground-level wall),
+            // we should still allow some sliding behavior for normal wall-running
+
+            // But if we have very little actual displacement despite having velocity,
+            // it means we're stuck against something and should reduce velocity
+            let velocity_magnitude = initial_velocity.length();
+            let displacement_magnitude = move_result.actual_displacement.length();
+
+            if velocity_magnitude > 0.1 && displacement_magnitude < velocity_magnitude * 0.1 {
+                // We're not moving much despite having velocity - we're stuck
+                // Reduce horizontal velocity significantly
+
+                // TODO: Temporarily disabled, this feels unnatural
+                // Is there not a more normal way to prevent excess sliding against unwalkable surfaces?
+                horizontal_velocity *= 0.2;
+                debug_log!(
+                    self.debug_config,
+                    "Detected stuck against wall - reduced horizontal velocity to {:?}",
+                    horizontal_velocity
+                );
+            }
         }
 
         horizontal_velocity + vertical_velocity
@@ -370,33 +426,33 @@ impl<'a> CharacterController<'a> {
         }
 
         // Side collision slope validation
-    if !is_walk_experiment && !is_moving_up && movement_state.validate_triangle_side {
-        let max_slope_angle = self
-            .grounding_config
-            .as_ref()
-            .map_or(std::f32::consts::FRAC_PI_4, |g| g.max_angle);
+        if !is_walk_experiment && !is_moving_up && movement_state.validate_triangle_side {
+            let max_slope_angle = self
+                .grounding_config
+                .as_ref()
+                .map_or(std::f32::consts::FRAC_PI_4, |g| g.max_angle);
 
-        let slope_is_unwalkable = test_slope(
-            movement_state.contact_normal_side_pass,
-            *self.character.up,
-            max_slope_angle,
-        );
+            let slope_is_unwalkable = test_slope(
+                movement_state.contact_normal_side_pass,
+                *self.character.up,
+                max_slope_angle,
+            );
 
-        if slope_is_unwalkable {
-            let start_height = self.position.dot(*self.character.up);
-            let current_height = movement_state.current_position.dot(*self.character.up);
-            let height_gained = current_height - start_height;
-            
-            if height_gained > 1e-6 {
-                movement_state.hit_non_walkable = true;
-                debug_log!(
-                    self.debug_config,
-                    "HIT NON-WALKABLE: Gained height ({:.6}) while sliding on an unwalkable slope. Triggering walk experiment.",
-                    height_gained
-                );
+            if slope_is_unwalkable {
+                let start_height = self.position.dot(*self.character.up);
+                let current_height = movement_state.current_position.dot(*self.character.up);
+                let height_gained = current_height - start_height;
+
+                if height_gained > 1e-6 {
+                    movement_state.hit_non_walkable = true;
+                    debug_log!(
+                        self.debug_config,
+                        "HIT NON-WALKABLE: Gained height ({:.6}) while sliding on an unwalkable slope. Triggering walk experiment.",
+                        height_gained
+                    );
+                }
             }
         }
-    }
 
         // PASS 3: DOWN
         let down_motion = if !is_moving_up {
@@ -455,6 +511,77 @@ impl<'a> CharacterController<'a> {
                     touched_tri_height,
                     slope_validation_step_offset
                 );
+
+                // If we're in walk experiment mode, perform the PhysX recovery sweep
+                if movement_state.walk_experiment {
+                    debug_log!(
+                        self.debug_config,
+                        "RECOVERY SWEEP: Performing PhysX-style recovery sweep for steep slope sliding"
+                    );
+
+                    // Set PhysX normalize response flag for recovery sweep
+                    movement_state.normalize_response = true;
+                    movement_state.prevent_vertical_motion = true;
+
+                    // Calculate recovery distance (PhysX logic)
+                    let current_height = movement_state.current_position.dot(*self.character.up);
+                    let original_height = self.position.dot(*self.character.up);
+                    let mut delta = if current_height > original_height {
+                        current_height - original_height
+                    } else {
+                        0.0
+                    };
+                    delta += displacement.dot(*self.character.up).abs();
+                    let recover_distance = delta;
+
+                    // Create downward recovery vector
+                    let recovery_vector = -*self.character.up * recover_distance;
+
+                    debug_log!(
+                        self.debug_config,
+                        "RECOVERY SWEEP: delta={:.6}, recover_distance={:.6}, recovery_vector={:?}",
+                        delta,
+                        recover_distance,
+                        recovery_vector
+                    );
+
+                    // Set target for recovery sweep
+                    movement_state.target_orientation =
+                        movement_state.current_position + recovery_vector;
+
+                    // Execute the recovery sweep with multiple iterations (this is the key!)
+                    let recovery_min_dist = if recover_distance < min_distance {
+                        recover_distance / 4.0 // PhysX uses maxIter here, we use 4
+                    } else {
+                        min_distance
+                    };
+
+                    execute_sweep_pass(
+                        &mut movement_state,
+                        SweepPass::Down, // PhysX uses SWEEP_PASS_UP for compatibility, but it's technically a down pass
+                        4,               // Multiple iterations for proper sliding!
+                        recovery_min_dist,
+                        original_bottom_point,
+                        &self.collider,
+                        self.rotation,
+                        self.grounding_config.as_ref(),
+                        &self.spatial_query,
+                        &self.filter,
+                        self.character.up,
+                        self.config.skin_width,
+                        self.debug_config,
+                    );
+
+                    // Clear the normalize response flag
+                    movement_state.normalize_response = false;
+                    movement_state.prevent_vertical_motion = false;
+
+                    debug_log!(
+                        self.debug_config,
+                        "RECOVERY SWEEP: Final position after recovery: {:?}",
+                        movement_state.current_position
+                    );
+                }
             }
         }
 
