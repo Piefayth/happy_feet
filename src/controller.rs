@@ -286,7 +286,7 @@ impl<'a> CharacterController<'a> {
 
                 // TODO: Temporarily disabled, this feels unnatural
                 // Is there not a more normal way to prevent excess sliding against unwalkable surfaces?
-                horizontal_velocity *= 0.2;
+                //horizontal_velocity *= 0.2;
                 debug_log!(
                     self.debug_config,
                     "Detected stuck against wall - reduced horizontal velocity to {:?}",
@@ -490,7 +490,7 @@ impl<'a> CharacterController<'a> {
         }
 
         // Triangle height validation
-        if !is_walk_experiment && movement_state.validate_triangle_down && has_horizontal_motion {
+        if movement_state.validate_triangle_down && has_horizontal_motion {
             let max_slope = self
                 .grounding_config
                 .as_ref()

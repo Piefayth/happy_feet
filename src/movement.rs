@@ -4,7 +4,9 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 
 use crate::{
-    debug::DebugMode, ground::{Grounding, GroundingConfig}, Character, KinematicVelocity
+    Character, KinematicVelocity,
+    debug::DebugMode,
+    ground::{Grounding, GroundingConfig},
 };
 
 pub(crate) fn clear_movement_input(mut query: Query<&mut MoveInput>) {
@@ -85,14 +87,8 @@ pub(crate) fn character_acceleration(
     )>,
     time: Res<Time>,
 ) {
-    for (
-        character,
-        move_input,
-        mut character_velocity,
-        grounding,
-        movement,
-        debug_mode,
-    ) in &mut query
+    for (character, move_input, mut character_velocity, grounding, movement, debug_mode) in
+        &mut query
     {
         let Ok((direction, throttle)) = Dir3::new_and_length(move_input.value) else {
             continue;
@@ -103,20 +99,14 @@ pub(crate) fn character_acceleration(
             continue;
         }
 
-        let mut desired_direction = *direction;
-        let mut velocity = character_velocity.0;
 
+        let old_velocity = character_velocity.0; // or .0 depending on your Velocity component
+        let mut new_velocity = *direction * movement.target_speed;
 
-        let move_accel = acceleration_with_horizontal_limit(
-            velocity,
-            desired_direction,
-            movement.acceleration * throttle,
-            movement.target_speed * throttle,
-            time.delta_secs(),
-            character.up,
-        );
+        // Preserve the old vertical velocity
+        new_velocity.y = old_velocity.y;
 
-        character_velocity.0 += move_accel;
+        character_velocity.0 = new_velocity;
     }
 }
 
@@ -222,6 +212,10 @@ impl MoveInput {
 }
 
 pub fn jump(impulse: f32, velocity: &mut KinematicVelocity, grounding: &mut Grounding, up: Dir3) {
+    if grounding.inner_ground().is_none() {
+        // can't air jump
+        return;
+    }
     // Remove vertical velocity
     velocity.0 = velocity.0.reject_from(*up);
 
@@ -247,63 +241,6 @@ pub fn feet_position(shape: &Collider, rotation: Quat, up: Dir3, skin_width: f32
     let aabb = shape.aabb(Vec3::ZERO, rotation);
     let down = aabb.min.dot(*up) - skin_width;
     up * down
-}
-
-#[must_use]
-fn acceleration_with_horizontal_limit(
-    velocity: Vec3,
-    direction: Vec3,
-    max_acceleration: f32,
-    target_speed: f32,
-    delta: f32,
-    up: Dir3,
-) -> Vec3 {
-    // Split velocity into horizontal and vertical components
-    let horizontal_velocity = velocity.reject_from(*up);
-    let horizontal_speed = horizontal_velocity.length();
-
-    // Project direction to horizontal plane
-    let horizontal_direction = (direction - direction.project_onto(*up)).normalize_or_zero();
-
-    // If we're under the speed limit, use normal acceleration
-    if horizontal_speed < target_speed {
-        let remaining_speed = target_speed - horizontal_speed;
-        let max_accel_this_frame = max_acceleration * delta;
-        let accel_magnitude = max_accel_this_frame.min(remaining_speed);
-        return horizontal_direction * accel_magnitude;
-    }
-
-    // We're at max speed - redirect the horizontal velocity toward the input direction
-    // while preserving the magnitude
-    if horizontal_speed < 1e-6 {
-        return Vec3::ZERO;
-    }
-
-    let current_horizontal_direction = horizontal_velocity / horizontal_speed;
-
-    // Calculate how fast we can rotate toward the desired direction
-    let rotation_rate = max_acceleration * delta / horizontal_speed; // radians per frame
-    let max_rotation_this_frame = rotation_rate.min(1.0); // Cap at 1 radian per frame
-
-    // Slerp (spherical linear interpolation) between current and desired direction
-    let dot = current_horizontal_direction
-        .dot(horizontal_direction)
-        .clamp(-1.0, 1.0);
-    let angle = dot.acos();
-
-    let new_direction = if angle < 1e-6 {
-        // Already pointing in the right direction
-        current_horizontal_direction
-    } else {
-        let t = (max_rotation_this_frame / angle).min(1.0);
-        current_horizontal_direction
-            .lerp(horizontal_direction, t)
-            .normalize()
-    };
-
-    // Return the acceleration needed to change to the new velocity
-    let new_horizontal_velocity = new_direction * horizontal_speed;
-    new_horizontal_velocity - horizontal_velocity
 }
 
 #[must_use]
