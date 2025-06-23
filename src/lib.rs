@@ -203,8 +203,6 @@ pub(crate) fn depenetrate_character(
                 continue;
             };
 
-        // TODO: crease / corner handling (?)
-
         for manifold in &contacts.manifolds {
             let hit_normal = match entity == rb1 {
                 true => -manifold.normal,
@@ -438,207 +436,116 @@ pub(crate) fn move_character_physx_style(
 
         // PhysX step offset logic
         let mut step_offset = if is_moving_up {
-            0.0 // Disable step offset when moving upward
+            0.0 // PhysX: disable step offset when jumping (unless on moving platform)
         } else {
             stepping_config
                 .map(|(config, _)| config.max_step_up)
                 .unwrap_or(0.0)
         };
 
-        // PhysX pass vector computation
-        let up_vector = if is_moving_up {
-            Some(vertical_component) // Actual upward motion (jumping)
-        } else if has_horizontal_motion && is_grounded && step_offset > 0.0 {
-            Some(*character.up * step_offset) // Artificial step offset
-        } else {
-            None
-        };
+        // Store original position for walk experiment retry
+        let original_position = transform.translation;
+        let original_displacement = total_displacement;
 
-        let side_vector = if has_horizontal_motion {
-            Some(horizontal_component) // Horizontal motion
-        } else {
-            None
-        };
-
-        let down_vector = if !is_moving_up {
-            Some(vertical_component) // Gravity motion
-        } else {
-            None
-        };
-
-        debug_log!(
-            debug_config,
-            "Pass vectors - Up: {:?}, Side: {:?}, Down: {:?}",
-            up_vector.map(|v| (v, v.length())),
-            side_vector.map(|v| (v, v.length())),
-            down_vector.map(|v| (v, v.length()))
-        );
-
-        // Initialize PhysX movement state
-        let mut movement_state = PhysXMovementState::new(transform.translation);
-        movement_state.ground = grounding.as_ref().and_then(|(g, _)| g.inner_ground());
-
-        let min_distance = collide_and_slide_config.skin_width * 0.1; // PhysX uses small minimum
-        let grounding_config_ref = grounding.as_ref().map(|(_, config)| &**config);
-
-        // PhysX collision flags
-        let mut collision_up = false;
-        let mut collision_sides = false;
-        let mut collision_down = false;
-
-        // PASS 1: UP
-        if let Some(up_motion) = up_vector {
-            let backup_position = movement_state.current_position;
-
-            // Temporarily set target for UP pass only
-            movement_state.target_orientation = movement_state.current_position + up_motion;
-
-            let had_collision = execute_physx_movement_pass(
-                &mut movement_state,
-                1, // PhysX uses maxIterUp (usually 1)
-                character,
-                collider,
-                transform.rotation,
-                collide_and_slide_config.skin_width,
-                &filter.0,
-                &spatial_query,
-                grounding_config_ref,
-                min_distance,
-                "UP",
-                &debug_config,
-            );
-
-            if had_collision {
-                collision_up = true;
-            }
-
-            // PhysX step offset clamping
-            if has_horizontal_motion && !is_moving_up && step_offset > 0.0 {
-                let actual_up_movement =
-                    (movement_state.current_position - backup_position).dot(*character.up);
-                if actual_up_movement < step_offset {
-                    step_offset = actual_up_movement.max(0.0);
-                    debug_log!(debug_config, "Clamped step offset to: {:.6}", step_offset);
-                }
-            }
-
-            // Reset target for remaining passes
-            movement_state.target_orientation = movement_state.current_position;
-        }
-
-        // PASS 2: SIDE
-        if let Some(side_motion) = side_vector {
-            // Add side motion to current target
-            movement_state.target_orientation = movement_state.current_position + side_motion;
-
-            let had_collision = execute_physx_movement_pass(
-                &mut movement_state,
-                4, // PhysX uses maxIterSides
-                character,
-                collider,
-                transform.rotation,
-                collide_and_slide_config.skin_width,
-                &filter.0,
-                &spatial_query,
-                grounding_config_ref,
-                min_distance,
-                "SIDE",
-                &debug_config,
-            );
-
-            if had_collision {
-                collision_sides = true;
-            }
-        }
-
-        // Clear ground before DOWN pass (TODO: Does PhysX do this? is this right? it WORKS...)
-        let executed_other_passes = up_vector.is_some() || side_vector.is_some();
-        if executed_other_passes {
-            movement_state.ground = None;
-            debug_log!(
-                debug_config,
-                "Cleared ground state for DOWN pass after other passes"
-            );
-        } else {
-            debug_log!(debug_config, "Preserving ground state - DOWN pass only");
-        }
-
-        // PASS 3: DOWN with step offset correction
-        let down_vector = if !is_moving_up {
-            // Moving down: use actual gravity motion
-            Some(vertical_component)
-        } else {
-            // Moving up: DOWN pass undoes artificial step offset only
-            if has_horizontal_motion && is_grounded && step_offset > 0.0 {
-                Some(-*character.up * step_offset) // Undo artificial step offset
-            } else {
-                Some(Vec3::ZERO) // Still do DOWN pass, but with zero motion
-            }
-        };
-
-        // PASS 3: DOWN - ALWAYS EXECUTED (like PhysX)
-        // PhysX: const bool PerformDownPass = true;
-        let down_motion = down_vector.unwrap(); // Always has a value now
-
-        let corrected_down_motion =
-            if !is_moving_up && has_horizontal_motion && is_grounded && step_offset > 0.0 {
-                // PhysX: Undo artificial up motion for gravity
-                down_motion - *character.up * step_offset
-            } else {
-                down_motion
-            };
-
-        debug_log!(
-            debug_config,
-            "DOWN motion: original={:?}, corrected={:?}",
-            down_motion,
-            corrected_down_motion
-        );
-
-        // Add down motion to current target
-        movement_state.target_orientation = movement_state.current_position + corrected_down_motion;
-
-        let had_collision = execute_physx_movement_pass(
-            &mut movement_state,
-            1, // PhysX uses maxIterDown (usually 1)
+        // =================================================================
+        // MAIN MOVEMENT ATTEMPT
+        // =================================================================
+        let mut final_movement_state = execute_movement_attempt(
+            original_position,
+            original_displacement,
+            step_offset,
+            has_horizontal_motion,
+            is_moving_up,
             character,
             collider,
             transform.rotation,
             collide_and_slide_config.skin_width,
             &filter.0,
             &spatial_query,
-            grounding_config_ref,
-            min_distance,
-            "DOWN",
+            grounding.as_ref().map(|(_, config)| &**config),
             &debug_config,
+            false, // not walk experiment
+            is_grounded,
         );
 
-        if had_collision && dir_dot_up <= 0.0 {
-            collision_down = true;
+        // =================================================================
+        // WALK EXPERIMENT & RETRY LOGIC (PhysX style)
+        // =================================================================
+        if final_movement_state.hit_non_walkable {
+            debug_log!(
+                debug_config,
+                "WALK EXPERIMENT: Hit unwalkable surface, retrying movement..."
+            );
+
+            // PhysX modifies the displacement based on non-walkable mode
+            // CRITICAL: Only remove UPWARD motion, preserve downward motion (gravity)
+            let (vertical_component, horizontal_component) =
+                decompose_displacement(original_displacement, character.up);
+            let vertical_is_upward = vertical_component.dot(*character.up) > 0.0;
+
+            let modified_displacement = if vertical_is_upward {
+                // Remove upward motion, keep only horizontal
+                horizontal_component
+            } else {
+                // Keep both horizontal and downward motion (gravity should still work)
+                original_displacement
+            };
+
+            debug_log!(
+                debug_config,
+                "WALK EXPERIMENT: Original displacement: {:?}",
+                original_displacement
+            );
+            debug_log!(
+                debug_config,
+                "WALK EXPERIMENT: Modified displacement: {:?}",
+                modified_displacement
+            );
+            debug_log!(
+                debug_config,
+                "WALK EXPERIMENT: Vertical was upward: {}",
+                vertical_is_upward
+            );
+
+            // Retry with modified displacement
+            let retry_result = execute_movement_attempt(
+                original_position,
+                modified_displacement,
+                step_offset,
+                has_horizontal_motion,
+                !vertical_is_upward, // is_moving_up = false if we removed upward motion
+                character,
+                collider,
+                transform.rotation,
+                collide_and_slide_config.skin_width,
+                &filter.0,
+                &spatial_query,
+                grounding.as_ref().map(|(_, config)| &**config),
+                &debug_config,
+                true, // this is walk experiment
+                is_grounded,
+            );
+
+            // Use retry result as final result
+            final_movement_state = retry_result;
+            debug_log!(debug_config, "WALK EXPERIMENT: Retry completed");
         }
 
-        // PhysX slope validation
-        if movement_state.validate_triangle_down && has_horizontal_motion {
-            if let Some(ground) = movement_state.ground {
-                let max_slope =
-                    grounding_config_ref.map_or(std::f32::consts::FRAC_PI_4, |g| g.max_angle);
-                let slope_too_steep = ground.normal.dot(*character.up).acos() > max_slope;
-                if slope_too_steep {
-                    movement_state.hit_non_walkable = true;
-                    debug_log!(debug_config, "Slope validation failed - surface too steep");
-                }
-            }
-        }
+        // PhysX collision flags from final result
+        let collision_up = final_movement_state.collision_flags & 0x1 != 0;
+        let collision_sides = final_movement_state.collision_flags & 0x2 != 0;
+        let collision_down = final_movement_state.collision_flags & 0x4 != 0;
 
         // Update grounding state and trigger events
         if let Some((grounding, _)) = grounding.as_mut() {
             let old_ground = grounding.inner_ground;
-            let new_ground = movement_state.ground;
+            let new_ground = final_movement_state.ground;
 
             // PhysX-style ground validation with displacement check
             let final_ground = if let Some(ground) = new_ground {
-                let net_vertical_displacement =
-                    (movement_state.current_position - transform.translation).dot(*character.up);
+                let net_vertical_displacement = (final_movement_state.current_position
+                    - transform.translation)
+                    .dot(*character.up);
                 let max_allowed_displacement = if has_horizontal_motion && is_grounded {
                     stepping_config
                         .map(|(config, _)| config.max_step_up)
@@ -677,12 +584,12 @@ pub(crate) fn move_character_physx_style(
         }
 
         // Apply final position
-        let final_displacement = movement_state.current_position - transform.translation;
-        transform.translation = movement_state.current_position;
+        let final_displacement = final_movement_state.current_position - transform.translation;
+        transform.translation = final_movement_state.current_position;
 
         // PhysX velocity handling: remove downward velocity when landing
         let (vertical_velocity, horizontal_velocity) = decompose_velocity(velocity.0, character.up);
-        if movement_state.ground.is_some() && vertical_velocity.dot(*character.up) <= 0.0 {
+        if final_movement_state.ground.is_some() && vertical_velocity.dot(*character.up) <= 0.0 {
             velocity.0 = horizontal_velocity;
             debug_log!(
                 debug_config,
@@ -731,7 +638,7 @@ pub(crate) fn move_character_physx_style(
                     DebugPoint {
                         translation: transform.translation,
                         velocity: velocity.0,
-                        hit: movement_state.ground.map(|ground| DebugHit {
+                        hit: final_movement_state.ground.map(|ground| DebugHit {
                             point,
                             normal: *ground.normal,
                             is_walkable: true,
@@ -743,6 +650,250 @@ pub(crate) fn move_character_physx_style(
 
         debug_log!(debug_config, "=== PHYSX MOVEMENT FRAME END ===\n");
     }
+}
+
+/// Execute a single movement attempt (either normal or walk experiment retry)
+fn execute_movement_attempt(
+    start_position: Vec3,
+    displacement: Vec3,
+    step_offset: f32,
+    has_horizontal_motion: bool,
+    is_moving_up: bool,
+    character: &Character,
+    collider: &Collider,
+    transform_rotation: Quat,
+    skin_width: f32,
+    filter: &SpatialQueryFilter,
+    spatial_query: &SpatialQuery,
+    grounding_config: Option<&GroundingConfig>,
+    debug_config: &MovementDebugConfig,
+    is_walk_experiment: bool,
+    is_grounded: bool,
+) -> PhysXMovementState {
+    let mut movement_state = PhysXMovementState::new(start_position);
+    movement_state.walk_experiment = is_walk_experiment; // FIXED: Actually set the flag
+
+    let min_distance = skin_width * 0.1; // PhysX uses small minimum
+
+    // PhysX decomposition into up/side/down vectors
+    let (vertical_component, horizontal_component) =
+        decompose_displacement(displacement, character.up);
+
+    let step_offset_was_applied =
+        has_horizontal_motion && step_offset > 0.0 && is_grounded && !is_walk_experiment;
+    let up_vector = if is_moving_up && !is_walk_experiment {
+        let mut up_motion = vertical_component;
+        if step_offset_was_applied {
+            up_motion += *character.up * step_offset;
+        }
+        Some(up_motion)
+    } else if step_offset_was_applied {
+        Some(*character.up * step_offset)
+    } else {
+        None
+    };
+
+    let side_vector = if has_horizontal_motion {
+        Some(horizontal_component) // Horizontal motion
+    } else {
+        None
+    };
+
+    let down_vector = if !is_moving_up {
+        Some(vertical_component) // Gravity motion
+    } else {
+        None
+    };
+
+    debug_log!(
+        debug_config,
+        "  {} - Pass vectors - Up: {:?}, Side: {:?}, Down: {:?}",
+        if is_walk_experiment { "RETRY" } else { "MAIN" },
+        up_vector.map(|v| (v, v.length())),
+        side_vector.map(|v| (v, v.length())),
+        down_vector.map(|v| (v, v.length()))
+    );
+
+    let mut collision_up = false;
+    let mut collision_sides = false;
+    let mut collision_down = false;
+
+    // PASS 1: UP (skipped in walk experiment)
+    if let Some(up_motion) = up_vector {
+        if !is_walk_experiment {
+            movement_state.target_orientation = movement_state.current_position + up_motion;
+
+            let had_collision = execute_physx_movement_pass(
+                &mut movement_state,
+                1, // PhysX uses maxIterUp (usually 1)
+                character,
+                collider,
+                transform_rotation,
+                skin_width,
+                filter,
+                spatial_query,
+                grounding_config,
+                min_distance,
+                "UP",
+                debug_config,
+            );
+
+            if had_collision {
+                collision_up = true;
+            }
+
+            // Reset target for remaining passes
+            movement_state.target_orientation = movement_state.current_position;
+        } else {
+            debug_log!(debug_config, "  RETRY: Skipping UP PASS (walk experiment)");
+        }
+    }
+
+    // PASS 2: SIDE
+    if let Some(side_motion) = side_vector {
+        movement_state.target_orientation = movement_state.current_position + side_motion;
+
+        let had_collision = execute_physx_movement_pass(
+            &mut movement_state,
+            4, // PhysX uses maxIterSides
+            character,
+            collider,
+            transform_rotation,
+            skin_width,
+            filter,
+            spatial_query,
+            grounding_config,
+            min_distance,
+            "SIDE",
+            debug_config,
+        );
+
+        if had_collision {
+            collision_sides = true;
+        }
+    }
+
+    // PhysX Constrained Climbing Check (only in main attempt, not retry)
+    if !is_walk_experiment && movement_state.validate_triangle_side {
+        let max_slope_angle = grounding_config.map_or(std::f32::consts::FRAC_PI_4, |g| g.max_angle);
+        let slope_is_unwalkable = !is_walkable(
+            movement_state.contact_normal_side_pass,
+            max_slope_angle,
+            *character.up,
+        );
+
+        if slope_is_unwalkable {
+            let half_height = collider.aabb(Vec3::ZERO, Quat::IDENTITY).size().y / 2.;
+            let original_bottom_point = start_position.dot(*character.up) - half_height;
+
+            // PhysX PRIMARY condition: contact point is higher than step offset allows
+            // CRITICAL: Only trigger if we're actually TRYING to move up (not falling)
+            let height_gained_too_much =
+                movement_state.contact_point_height > original_bottom_point + step_offset;
+            let is_trying_to_move_up = displacement.dot(*character.up) > 0.0; // Check if original movement was upward
+
+            // PhysX SECONDARY condition: hitting unwalkable side surface while also constrained by ceiling
+            let constrained_by_ceiling = collision_up;
+
+            if height_gained_too_much && is_trying_to_move_up {
+                movement_state.hit_non_walkable = true;
+                debug_log!(
+                    debug_config,
+                    "Constrained Climbing: Hit unwalkable side surface and gained too much height while trying to move up."
+                );
+            } else if constrained_by_ceiling && is_trying_to_move_up {
+                movement_state.hit_non_walkable = true;
+                debug_log!(
+                    debug_config,
+                    "Constrained Climbing: Hit unwalkable side surface while constrained by ceiling and trying to move up."
+                );
+            } else {
+                debug_log!(
+                    debug_config,
+                    "Constrained Climbing: Hit unwalkable side surface but no climbing detected."
+                );
+                debug_log!(
+                    debug_config,
+                    "  Height gained: {}, trying to move up: {}, ceiling collision: {}",
+                    height_gained_too_much,
+                    is_trying_to_move_up,
+                    constrained_by_ceiling
+                );
+            }
+        }
+    }
+
+    // Clear ground before DOWN pass
+    let executed_other_passes = up_vector.is_some() || side_vector.is_some();
+    if executed_other_passes {
+        movement_state.ground = None;
+        debug_log!(
+            debug_config,
+            "  {}: Cleared ground state for DOWN pass after other passes",
+            if is_walk_experiment { "RETRY" } else { "MAIN" }
+        );
+    }
+
+    // PASS 3: DOWN
+    let down_motion = if !is_moving_up {
+        vertical_component // Raw gravity
+    } else {
+        Vec3::ZERO // No downward motion when moving up
+    };
+
+    // Then apply step offset correction (PhysX style)
+    let corrected_down_motion = if step_offset_was_applied {
+        down_motion - *character.up * step_offset // Undo the artificial up motion
+    } else {
+        down_motion
+    };
+
+    movement_state.target_orientation = movement_state.current_position + corrected_down_motion;
+
+    let had_collision = execute_physx_movement_pass(
+        &mut movement_state,
+        1, // PhysX uses maxIterDown (usually 1)
+        character,
+        collider,
+        transform_rotation,
+        skin_width,
+        filter,
+        spatial_query,
+        grounding_config,
+        min_distance,
+        "DOWN",
+        debug_config,
+    );
+
+    if had_collision && displacement.dot(*character.up) <= 0.0 {
+        collision_down = true;
+    }
+
+    // PhysX slope validation (only in main attempt)
+    if !is_walk_experiment && movement_state.validate_triangle_down && has_horizontal_motion {
+        if let Some(ground) = movement_state.ground {
+            let max_slope = grounding_config.map_or(std::f32::consts::FRAC_PI_4, |g| g.max_angle);
+            let slope_too_steep = ground.normal.dot(*character.up).acos() > max_slope;
+            if slope_too_steep {
+                movement_state.hit_non_walkable = true;
+                debug_log!(debug_config, "Slope validation failed - surface too steep");
+            }
+        }
+    }
+
+    // Store collision flags
+    movement_state.collision_flags = 0;
+    if collision_up {
+        movement_state.collision_flags |= 0x1;
+    }
+    if collision_sides {
+        movement_state.collision_flags |= 0x2;
+    }
+    if collision_down {
+        movement_state.collision_flags |= 0x4;
+    }
+
+    movement_state
 }
 
 fn decompose_displacement(displacement: Vec3, up_direction: Dir3) -> (Vec3, Vec3) {
@@ -767,19 +918,26 @@ pub(crate) struct PhysXMovementState {
     pub validate_triangle_down: bool,
     pub validate_triangle_side: bool,
     pub hit_non_walkable: bool,
+    // Fields to store side pass collision data
+    pub contact_normal_side_pass: Vec3,
+    pub contact_point_height: f32,
+    // Walk experiment flag
+    pub walk_experiment: bool,
 }
 
 impl PhysXMovementState {
     fn new(position: Vec3) -> Self {
-        // REMOVE total_displacement
         Self {
             current_position: position,
-            target_orientation: position, // Initialize to current position
+            target_orientation: position,
             ground: None,
             collision_flags: 0,
             validate_triangle_down: false,
             validate_triangle_side: false,
             hit_non_walkable: false,
+            contact_normal_side_pass: Vec3::ZERO,
+            contact_point_height: 0.0,
+            walk_experiment: false,
         }
     }
 
@@ -799,41 +957,73 @@ impl PhysXMovementState {
 }
 
 /// PhysX collision response - modifies target orientation, not velocity
+// fn physx_collision_response(
+//     state: &mut PhysXMovementState,
+//     current_direction: Vec3,
+//     hit_normal: Vec3,
+// ) {
+//     // Get remaining distance to travel
+//     let remaining_displacement = state.target_orientation - state.current_position;
+//     let amplitude = remaining_displacement.length();
+
+//     if amplitude < 1e-6 {
+//         return;
+//     }
+
+//     // PhysX collision response: project remaining motion onto surface
+//     // This is simpler than full reflection - just remove the component going into the surface
+//     let remaining_motion_parallel_to_surface = remaining_displacement.reject_from(hit_normal);
+    
+//     // Set new target: current position + motion parallel to surface
+//     state.target_orientation = state.current_position + remaining_motion_parallel_to_surface;
+// }
+
 fn physx_collision_response(
     state: &mut PhysXMovementState,
     current_direction: Vec3,
     hit_normal: Vec3,
 ) {
-    // Calculate original amplitude for reflection scaling
+    // Calculate original amplitude for scaling
     let amplitude = (state.target_orientation - state.current_position).length();
-
+    
     if amplitude < 1e-6 {
         return;
     }
 
-    // Compute reflection vector (PhysX computeReflexionVector)
+    // PhysX computeReflexionVector: reflect = incoming - normal * 2 * dot(incoming, normal)
     let reflect_dir = current_direction - hit_normal * 2.0 * current_direction.dot(hit_normal);
     let reflect_dir = reflect_dir.normalize_or_zero();
 
-    // Decompose reflection into normal and tangent components
+    // PhysX decomposeVector: split reflection into normal and tangent components relative to hit normal
     let normal_component = reflect_dir.project_onto(hit_normal);
     let tangent_component = reflect_dir - normal_component;
 
-    // PhysX collision response parameters
-    let bump = 0.0; // PhysX uses 0.0 for bump
-    let friction = 1.0; // PhysX uses 1.0 for friction
+    // PhysX parameters (from C++ code)
+    let bump = 0.0;     // PhysX uses 0.0 - no bouncing away from surface
+    let friction = 1.0; // PhysX uses 1.0 - full sliding along surface
+    let normalize = false; // PhysX usually uses false
 
-    // CRITICAL: Reset target to current position first (PhysX behavior)
+    // PhysX behavior: reset target to current position first
     state.target_orientation = state.current_position;
 
-    // Apply reflection components
+    // Add bump component (usually zero, so usually no effect)
     if bump != 0.0 {
-        let normal_normalized = normal_component.normalize_or_zero();
-        state.target_orientation += normal_normalized * bump * amplitude;
+        let normal_to_add = if normalize {
+            normal_component.normalize_or_zero()
+        } else {
+            normal_component
+        };
+        state.target_orientation += normal_to_add * bump * amplitude;
     }
+
+    // Add friction component (this is the sliding motion along the surface)
     if friction != 0.0 {
-        let tangent_normalized = tangent_component.normalize_or_zero();
-        state.target_orientation += tangent_normalized * friction * amplitude;
+        let tangent_to_add = if normalize {
+            tangent_component.normalize_or_zero()
+        } else {
+            tangent_component
+        };
+        state.target_orientation += tangent_to_add * friction * amplitude;
     }
 }
 
@@ -852,13 +1042,19 @@ fn execute_physx_movement_pass(
     pass_name: &str,
     debug_config: &MovementDebugConfig,
 ) -> bool {
-    debug_log!(debug_config, "  {} PASS START", pass_name);
+    let pass_label = if state.walk_experiment {
+        format!("RETRY {}", pass_name)
+    } else {
+        pass_name.to_string()
+    };
+
+    debug_log!(debug_config, "  {} PASS START", pass_label);
 
     let mut had_collision = false;
     let original_direction = if let Some((dir, _)) = state.current_direction() {
         *dir
     } else {
-        debug_log!(debug_config, "  {} PASS: No movement needed", pass_name);
+        debug_log!(debug_config, "  {} PASS: No movement needed", pass_label);
         return false;
     };
 
@@ -869,30 +1065,18 @@ fn execute_physx_movement_pass(
             debug_log!(
                 debug_config,
                 "    {} iter {}: No more movement needed",
-                pass_name,
+                pass_label,
                 iteration
             );
             break;
         };
-
-        if max_distance <= min_distance {
-            debug_log!(
-                debug_config,
-                "    {} iter {}: Distance {} below minimum {}",
-                pass_name,
-                iteration,
-                max_distance,
-                min_distance
-            );
-            break;
-        }
 
         // PhysX "Quake2 hack" - prevent oscillation by checking direction reversal
         if current_direction.dot(original_direction) <= 0.0 {
             debug_log!(
                 debug_config,
                 "    {} iter {}: Direction reversed, stopping (Quake2 hack)",
-                pass_name,
+                pass_label,
                 iteration
             );
             break;
@@ -901,7 +1085,7 @@ fn execute_physx_movement_pass(
         debug_log!(
             debug_config,
             "    {} iter {}: direction={:?}, distance={:.6}",
-            pass_name,
+            pass_label,
             iteration,
             current_direction,
             max_distance
@@ -923,10 +1107,12 @@ fn execute_physx_movement_pass(
             debug_log!(
                 debug_config,
                 "    {} iter {}: No collision, moving full distance",
-                pass_name,
+                pass_label,
                 iteration
             );
-            state.current_position = state.target_orientation;
+            if max_distance > min_distance {
+                state.current_position = state.target_orientation;
+            }
             break;
         };
 
@@ -939,7 +1125,7 @@ fn execute_physx_movement_pass(
         debug_log!(
             debug_config,
             "    {} iter {}: Hit at distance {:.6}, normal={:?}, entity={:?}",
-            pass_name,
+            pass_label,
             iteration,
             safe_distance,
             hit.normal,
@@ -956,7 +1142,7 @@ fn execute_physx_movement_pass(
                 debug_log!(
                     debug_config,
                     "    {} iter {}: Found walkable ground",
-                    pass_name,
+                    pass_label,
                     iteration
                 );
             }
@@ -965,42 +1151,62 @@ fn execute_physx_movement_pass(
             if pass_name == "DOWN" && surface.is_walkable {
                 state.validate_triangle_down = true;
             }
-            if pass_name == "SIDE" && !surface.is_walkable {
+
+            // Always store data for the SIDE pass when there's a collision
+            if pass_name == "SIDE" {
                 state.validate_triangle_side = true;
+                state.contact_normal_side_pass = hit.normal;
+                state.contact_point_height = hit.point.dot(*character.up);
+
+                debug_log!(
+                    debug_config,
+                    "    {} iter {}: Stored side collision data - normal={:?}, height={:.6}",
+                    pass_label,
+                    iteration,
+                    hit.normal,
+                    state.contact_point_height
+                );
             }
         }
 
-        // HACK - Don't get stuck between overhangs and platforms when jumping into vertically narrow gaps
-        if pass_name == "UP" && hit.normal.dot(*character.up) < -0.5 {
-            // This is a ceiling hit
+
+        let mut response_normal = hit.normal;
+
+        // PhysX: VERY LIMITED collision response modification
+        // Only modify collision response in extremely specific cases:
+        // 1. preventVerticalSlidingAgainstCeiling AND moving up AND hitting ceiling
+        // 2. Walk experiment with SPECIFIC non-walkable mode (not PREVENT_CLIMBING_AND_FORCE_SLIDING)
+
+        let should_modify_response = false; // Start with false - be very conservative
+        
+        // For now, let's disable ALL collision response modification
+        // The original PhysX logic is quite complex and we should implement it step by step
+        // Most of the time, normal collision response (reflection) is what we want
+        
+        if should_modify_response {
             debug_log!(
                 debug_config,
-                "UP pass ceiling hit - projecting normal to horizontal"
+                "    {} iter {}: Modifying collision response (currently disabled)",
+                pass_label,
+                iteration
             );
-
-            // Project the normal to horizontal plane to prevent wedging
-            let mut modified_normal = hit.normal;
-            let vertical_component = modified_normal.project_onto(*character.up);
-            modified_normal = modified_normal - vertical_component;
-
-            if modified_normal.length() > 0.1 {
-                modified_normal = modified_normal.normalize();
-                // Use the horizontal-projected normal for collision response
-                physx_collision_response(state, *current_direction, modified_normal);
-            } else {
-                // Pure ceiling hit - stop upward motion entirely
-                debug_log!(debug_config, "Pure ceiling hit - stopping UP pass");
-                break;
+            
+            // Keep this code for when we need to implement specific cases later
+            let vertical_part = response_normal.project_onto(*character.up);
+            let horizontal_part = response_normal - vertical_part;
+            
+            if horizontal_part.length_squared() > 1e-6 {
+                response_normal = horizontal_part.normalize();
             }
-        } else {
-            // Normal collision response
-            physx_collision_response(state, *current_direction, hit.normal);
         }
+
+        // Perform the collision response with the potentially modified normal
+        physx_collision_response(state, *current_direction, response_normal);
 
         debug_log!(
             debug_config,
             "    {} iter {}: After collision response, new target={:?}",
-            pass_name,
+            pass_label,
             iteration,
             state.target_orientation
         );
@@ -1009,7 +1215,7 @@ fn execute_physx_movement_pass(
     debug_log!(
         debug_config,
         "  {} PASS END: had_collision={}, final_pos={:?}",
-        pass_name,
+        pass_label,
         had_collision,
         state.current_position
     );
@@ -1017,7 +1223,6 @@ fn execute_physx_movement_pass(
     had_collision
 }
 
-// Rest of the structs and functions remain the same...
 #[derive(Component, Reflect, Debug, Clone, Copy)]
 #[reflect(Component, Default)]
 #[require(

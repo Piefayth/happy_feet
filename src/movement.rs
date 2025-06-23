@@ -25,7 +25,11 @@ pub(crate) fn character_gravity(
     )>,
     time: Res<Time>,
 ) {
-    for (mut velocity, character_gravity, _, gravity_scale) in &mut query {
+    for (mut velocity, character_gravity, grounding, gravity_scale) in &mut query {
+        // if grounding.map_or(false, |g| g.is_grounded()) {
+        //     continue;
+        // }
+
         let mut gravity = character_gravity.map_or(default_gravity.0, |g| g.0);
 
         if let Some(gravity_scale) = gravity_scale {
@@ -35,7 +39,6 @@ pub(crate) fn character_gravity(
         velocity.0 += gravity * time.delta_secs();
     }
 }
-
 pub(crate) fn character_friction(
     mut characters: Query<(&mut KinematicVelocity, &Grounding, &CharacterFriction)>,
     frictions: Query<&FrictionScale>,

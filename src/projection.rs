@@ -94,55 +94,6 @@ pub(crate) fn project_velocity(
     }
 }
 
-/// Detects if two colliding surfaces form a crease that requires special handling.
-pub(crate) fn detect_crease(
-    current_surface: Surface,
-    previous_surface: Surface,
-    current_velocity: Vec3,
-    previous_velocity: Vec3,
-    is_grounded: bool,
-) -> Option<Dir3> {
-    // Skip if both surfaces are walkable and character is currently grounded
-    if is_grounded && current_surface.is_walkable && previous_surface.is_walkable {
-        return None;
-    }
-
-    // Skip if normals are nearly parallel
-    if current_surface.normal.dot(*previous_surface.normal) > 1.0 - 1e-3 {
-        return None;
-    }
-
-    // Calculate the direction of the crease
-    let mut crease_direction =
-        Dir3::new(current_surface.normal.cross(*previous_surface.normal)).unwrap();
-
-    // Project normals onto the plane perpendicular to the crease
-    let current_normal_on_crease_plane =
-        *Dir3::new(current_surface.normal.reject_from(*crease_direction)).unwrap();
-    let previous_normal_on_crease_plane =
-        *Dir3::new(previous_surface.normal.reject_from(*crease_direction)).unwrap();
-
-    // Project previous velocity onto the crease plane
-    let entering_velocity_on_crease_plane = previous_velocity.reject_from(*crease_direction);
-
-    // Check if the angle between planes indicates a concave corner and if the velocity is going into it
-    let dot_planes_on_crease_planes = current_normal_on_crease_plane.dot(*previous_surface.normal);
-
-    if dot_planes_on_crease_planes
-        > entering_velocity_on_crease_plane.dot(-current_normal_on_crease_plane) + 1e-3
-        || dot_planes_on_crease_planes
-            > entering_velocity_on_crease_plane.dot(-previous_normal_on_crease_plane) + 1e-3
-    {
-        return None;
-    }
-
-    // Flip the crease direction to match the direction of the current velocity
-    if crease_direction.dot(current_velocity) < 0.0 {
-        crease_direction = -crease_direction;
-    }
-
-    Some(crease_direction)
-}
 
 /// Align the vector with the `normal` plane along the `up` axis.
 ///
