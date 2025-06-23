@@ -112,9 +112,7 @@ impl Plugin for CharacterPlugin {
 
         app.add_systems(
             self.schedule,
-            (
-                move_character_physx_style,
-            )
+            (move_character_physx_style,)
                 .in_set(CharacterSystems::ApplyMovement)
                 .chain(),
         );
@@ -423,15 +421,29 @@ pub(crate) fn move_character_physx_style(
         transform.translation = final_movement_state.current_position;
 
         // PhysX velocity handling: remove downward velocity when landing
-        let (vertical_velocity, horizontal_velocity) = decompose_velocity(velocity.0, character.up);
+        let (mut vertical_velocity, horizontal_velocity) =
+            decompose_velocity(velocity.0, character.up);
+
+        // If we hit the ground while moving down, cancel downward velocity.
         if final_movement_state.ground.is_some() && vertical_velocity.dot(*character.up) <= 0.0 {
-            velocity.0 = horizontal_velocity;
+            vertical_velocity = Vec3::ZERO;
             debug_log!(
                 debug_config,
                 "Landed: removed downward velocity, keeping horizontal={:?}",
                 horizontal_velocity
             );
         }
+
+        // --- NEW LOGIC ---
+        // If we hit a ceiling while moving up, cancel upward velocity.
+        let collision_up = final_movement_state.collision_flags & 0x1 != 0;
+        if collision_up && vertical_velocity.dot(*character.up) > 0.0 {
+            vertical_velocity = Vec3::ZERO;
+            debug_log!(debug_config, "Ceiling Hit: removed upward velocity.");
+        }
+
+        // Recompose the final velocity.
+        velocity.0 = horizontal_velocity + vertical_velocity;
 
         debug_log!(
             debug_config,
@@ -551,7 +563,7 @@ fn execute_movement_attempt(
     // for finding a *new* ground with its subsequent DOWN pass.
     if up_vector.is_some() {
         debug_log!(
-            debug_config, 
+            debug_config,
             "  {}: Upward motion detected, clearing initial ground state",
             if is_walk_experiment { "RETRY" } else { "MAIN" }
         );
@@ -737,8 +749,6 @@ fn execute_movement_attempt(
     movement_state
 }
 
-
-
 fn decompose_displacement(displacement: Vec3, up_direction: Dir3) -> (Vec3, Vec3) {
     let vertical = displacement.project_onto(*up_direction);
     let horizontal = displacement - vertical;
@@ -806,7 +816,7 @@ fn physx_collision_response(
 ) {
     // Calculate original amplitude for scaling
     let amplitude = (state.target_orientation - state.current_position).length();
-    
+
     if amplitude < 1e-6 {
         return;
     }
@@ -820,7 +830,7 @@ fn physx_collision_response(
     let tangent_component = reflect_dir - normal_component;
 
     // PhysX parameters (from C++ code)
-    let bump = 0.0;     // PhysX uses 0.0 - no bouncing away from surface
+    let bump = 0.0; // PhysX uses 0.0 - no bouncing away from surface
     let friction = 1.0; // PhysX uses 1.0 - full sliding along surface
     let normalize = false; // PhysX usually uses false
 
@@ -878,7 +888,7 @@ fn execute_physx_movement_pass(
         debug_log!(debug_config, "  {} PASS: No movement needed", pass_label);
         return false;
     };
-    
+
     // PhysX iteration loop with ONLY actual PhysX termination conditions
     for iteration in 0..max_iterations {
         // Check if movement is complete
@@ -947,7 +957,7 @@ fn execute_physx_movement_pass(
             if max_distance > min_distance {
                 state.current_position = state.target_orientation;
             }
-            
+
             // CRITICAL FIX: Only clear ground state if this was a DOWN pass
             // that moved the full intended distance without finding ground
             if pass_name == "DOWN" && max_distance > min_distance {
@@ -959,7 +969,7 @@ fn execute_physx_movement_pass(
                 );
                 state.ground = None;
             }
-            
+
             break;
         };
 
