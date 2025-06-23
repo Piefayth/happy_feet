@@ -4,9 +4,7 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 
 use crate::{
-    Character, KinematicVelocity, align_with_surface,
-    debug::DebugMode,
-    ground::{Grounding, GroundingConfig},
+    debug::DebugMode, ground::{Grounding, GroundingConfig}, Character, KinematicVelocity
 };
 
 pub(crate) fn clear_movement_input(mut query: Query<&mut MoveInput>) {
@@ -108,12 +106,6 @@ pub(crate) fn character_acceleration(
         let mut desired_direction = *direction;
         let mut velocity = character_velocity.0;
 
-        if let Some((grounding, _grounding_settings)) = grounding {
-            if let Some(normal) = grounding.normal() {
-                desired_direction = align_with_surface(desired_direction, *normal, *character.up);
-                velocity = align_with_surface(velocity, *normal, *character.up);
-            }
-        }
 
         let move_accel = acceleration_with_horizontal_limit(
             velocity,

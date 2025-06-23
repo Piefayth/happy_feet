@@ -4,7 +4,10 @@ use avian3d::prelude::*;
 use bevy::{color::palettes::css::*, prelude::*};
 
 use crate::{
-    feet_position, ground::Grounding, move_character_physx_style, movement::{CharacterMovement, MoveInput}, sweep::CollideAndSlideConfig, Character, KinematicVelocity
+    Character, KinematicVelocity, feet_position,
+    ground::Grounding,
+    movement::{CharacterMovement, MoveInput},
+    sweep::CollideAndSlideConfig,
 };
 
 pub(crate) fn plugin(app: &mut App) {
@@ -21,10 +24,10 @@ pub(crate) fn plugin(app: &mut App) {
         },
     );
 
-    app.add_systems(
-        FixedPostUpdate,
-        (draw_input_arrow, draw_motion).after(move_character_physx_style),
-    );
+    app.add_systems(FixedPostUpdate, (draw_input_arrow, draw_motion));
+
+    app.init_resource::<MovementDebugConfig>();
+    app.add_systems(Update, toggle_movement_debug);
 }
 
 #[derive(GizmoConfigGroup, Reflect, Default)]
@@ -312,4 +315,32 @@ fn draw_motion(
             });
         }
     }
+}
+
+#[derive(Resource, Default, Clone, Copy)]
+pub struct MovementDebugConfig {
+    pub enabled: bool,
+}
+
+pub fn toggle_movement_debug(
+    mut debug_config: ResMut<MovementDebugConfig>,
+    input: Res<ButtonInput<KeyCode>>,
+) {
+    if input.just_pressed(KeyCode::F9) {
+        debug_config.enabled = !debug_config.enabled;
+        if debug_config.enabled {
+            warn!("🔍 Movement debug logging ENABLED - Press F9 to disable");
+        } else {
+            warn!("🔇 Movement debug logging DISABLED - Press F9 to enable");
+        }
+    }
+}
+
+#[macro_export]
+macro_rules! debug_log {
+    ($debug_config:expr, $($arg:tt)*) => {
+        if $debug_config.enabled {
+            info!($($arg)*);
+        }
+    };
 }
