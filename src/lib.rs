@@ -773,6 +773,7 @@ pub(crate) struct PhysXMovementState {
     pub hit_non_walkable: bool,
     // Fields to store side pass collision data
     pub contact_normal_side_pass: Vec3,
+    pub contact_normal_down_pass: Vec3,
     pub contact_point_height: f32,
     // Walk experiment flag
     pub walk_experiment: bool,
@@ -789,6 +790,7 @@ impl PhysXMovementState {
             validate_triangle_side: false,
             hit_non_walkable: false,
             contact_normal_side_pass: Vec3::ZERO,
+            contact_normal_down_pass: Vec3::ZERO,
             contact_point_height: 0.0,
             walk_experiment: false,
         }
@@ -1006,6 +1008,7 @@ fn execute_physx_movement_pass(
 
             if pass_name == "DOWN" && surface.is_walkable {
                 state.validate_triangle_down = true;
+                state.contact_normal_down_pass = hit.normal;
             }
 
             if pass_name == "SIDE" {
