@@ -1,6 +1,5 @@
 use crate::{
     ground::GroundingConfig,
-    sweep::{SweepHitData, sweep},
 };
 use bevy::prelude::*;
 

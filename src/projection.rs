@@ -22,78 +22,7 @@ impl Surface {
             is_walkable: is_walkable(*normal, walkable_angle, *up_direction),
         }
     }
-
-    pub fn obstruction_normal(
-        &self,
-        current_ground_normal: Option<Dir3>,
-        up_direction: Dir3,
-    ) -> Result<Dir3, InvalidDirectionError> {
-        if !self.is_walkable {
-            if let Some(ground_normal) = current_ground_normal {
-                // Calculate obstruction normal perpendicular to both ground normal and the up direction
-                let tangent = Dir3::new(ground_normal.cross(*self.normal))?;
-                return Dir3::new(tangent.cross(*up_direction));
-            }
-        }
-
-        Ok(self.normal)
-    }
-
-
-    #[must_use]
-    pub fn project_velocity(
-        &self,
-        velocity: Vec3,
-        current_ground_normal: Option<Dir3>,
-        up_direction: Dir3,
-    ) -> Vec3 {
-        let obstruction_normal = *self
-            .obstruction_normal(current_ground_normal, up_direction)
-            .unwrap();
-
-        project_velocity(
-            velocity,
-            obstruction_normal,
-            self.is_walkable,
-            current_ground_normal,
-            up_direction,
-        )
-    }
 }
-
-
-pub(crate) fn project_velocity(
-    velocity: Vec3,
-    obstruction_normal: Vec3,
-    is_walkable: bool,
-    current_ground_normal: Option<Dir3>,
-    up_direction: Dir3,
-) -> Vec3 {
-    match (current_ground_normal, is_walkable) {
-        // Character on ground, moving to walkable surface
-        (Some(_), true) => {
-            // Align the velocity to the surface while maintaining the horizontal direction
-            align_with_surface(velocity, obstruction_normal, *up_direction)
-        }
-        // Character on ground, moving to non-walkable surface - SLIDE ONLY
-        (Some(_ground_normal), false) => {
-            // Just slide along the wall - stepping happens through position displacement
-            velocity.reject_from(obstruction_normal)
-        }
-        // Character in air, hitting walkable surface
-        (None, true) => {
-            // Remove the vertical component and align with the surface
-            let velocity = velocity.reject_from(*up_direction);
-            align_with_surface(velocity, obstruction_normal, *up_direction)
-        }
-        // Character in air, hitting non-walkable surface
-        (None, false) => {
-            // Simply slide along the surface
-            velocity.reject_from(obstruction_normal)
-        }
-    }
-}
-
 
 /// Align the vector with the `normal` plane along the `up` axis.
 ///

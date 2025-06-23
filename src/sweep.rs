@@ -1,10 +1,8 @@
-use std::mem;
-
 use avian3d::prelude::*;
 use bevy::prelude::*;
 
 use crate::{
-    debug_log, ground::Ground, projection::Surface, CollideAndSlideFilter,
+    CollideAndSlideFilter,
 };
 
 #[derive(Reflect, Debug, Clone, Copy)]

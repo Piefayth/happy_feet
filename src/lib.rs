@@ -8,17 +8,12 @@ use bevy::{
 
 use debug::{CharacterGizmos, DebugHit, DebugMode, DebugMotion, DebugPoint};
 use ground::{Ground, Grounding, GroundingConfig, is_walkable};
-use interactions::physics_interactions;
 use movement::{
     CharacterDrag, CharacterFriction, CharacterGravity, CharacterMovement, MoveInput,
     character_acceleration, character_drag, character_friction, character_gravity,
     clear_movement_input, feet_position,
 };
-use platform::{
-    InheritedVelocity, PhysicsMover, inherit_platform_velocity, move_with_platform,
-    update_physics_mover, update_platform_velocity,
-};
-use projection::{Surface, align_with_surface, project_velocity};
+use projection::{Surface, align_with_surface};
 use stepping::{SteppingBehaviour, SteppingConfig};
 use sweep::{CollideAndSlideConfig, SweepHitData, sweep};
 
@@ -26,9 +21,7 @@ use sweep::{CollideAndSlideConfig, SweepHitData, sweep};
 
 pub mod debug;
 pub mod ground;
-pub(crate) mod interactions;
 pub mod movement;
-pub mod platform;
 pub(crate) mod projection;
 pub mod stepping;
 pub mod sweep;
@@ -40,7 +33,6 @@ pub mod prelude {
         movement::{
             CharacterDrag, CharacterFriction, CharacterGravity, CharacterMovement, MoveInput,
         },
-        platform::PhysicsMover,
         stepping::{SteppingBehaviour, SteppingConfig},
         sweep::CollideAndSlideConfig,
     };
@@ -79,7 +71,6 @@ impl Plugin for CharacterPlugin {
         app.add_systems(Update, toggle_movement_debug);
         app.register_type::<(
             Character,
-            PhysicsMover,
             CharacterMovement,
             CharacterFriction,
             CharacterGravity,
@@ -122,25 +113,11 @@ impl Plugin for CharacterPlugin {
         app.add_systems(
             self.schedule,
             (
-                update_platform_velocity,
-                move_with_platform,
                 move_character_physx_style,
             )
                 .in_set(CharacterSystems::ApplyMovement)
                 .chain(),
         );
-
-        app.add_systems(
-            self.schedule,
-            physics_interactions.in_set(CharacterSystems::PhysicsInteractions),
-        );
-
-        app.add_systems(
-            self.schedule,
-            update_physics_mover.in_set(PhysicsSet::Prepare),
-        );
-
-        app.add_observer(inherit_platform_velocity);
     }
 }
 
@@ -822,28 +799,6 @@ impl PhysXMovementState {
     }
 }
 
-/// PhysX collision response - modifies target orientation, not velocity
-// fn physx_collision_response(
-//     state: &mut PhysXMovementState,
-//     current_direction: Vec3,
-//     hit_normal: Vec3,
-// ) {
-//     // Get remaining distance to travel
-//     let remaining_displacement = state.target_orientation - state.current_position;
-//     let amplitude = remaining_displacement.length();
-
-//     if amplitude < 1e-6 {
-//         return;
-//     }
-
-//     // PhysX collision response: project remaining motion onto surface
-//     // This is simpler than full reflection - just remove the component going into the surface
-//     let remaining_motion_parallel_to_surface = remaining_displacement.reject_from(hit_normal);
-    
-//     // Set new target: current position + motion parallel to surface
-//     state.target_orientation = state.current_position + remaining_motion_parallel_to_surface;
-// }
-
 fn physx_collision_response(
     state: &mut PhysXMovementState,
     current_direction: Vec3,
@@ -1092,7 +1047,6 @@ fn execute_physx_movement_pass(
     CollideAndSlideConfig,
     CollideAndSlideFilter,
     KinematicVelocity,
-    InheritedVelocity,
     Grounding,
     GroundingConfig,
     CharacterFriction,

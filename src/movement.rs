@@ -124,15 +124,6 @@ pub(crate) fn character_acceleration(
             character.up,
         );
 
-        // let move_accel = acceleration_with_brake(
-        //     velocity.reject_from_normalized(*character.up),
-        //     direction,
-        //     movement.acceleration * throttle,
-        //     movement.target_speed * throttle,
-        //     BrakeFactor::all(0.1),
-        //     time.delta_secs(),
-        // );
-
         character_velocity.0 += move_accel;
     }
 }
@@ -360,71 +351,4 @@ impl BrakeFactor {
             lateral: value,
         }
     }
-}
-
-/// Compute the acceleration vector for the movement of a character.
-///
-/// For best results `velocity` should generally be constrained to the movement plane,
-/// e.g., `velocity.reject_from(Vec3::Y)`.
-/// Otherwise, jump height will be inconsistent when moving and standing still.
-#[must_use]
-pub fn acceleration_with_brake(
-    velocity: Vec3,
-    direction: Vec3,
-    max_acceleration: f32,
-    target_speed: f32,
-    brake_factor: BrakeFactor,
-    delta: f32,
-) -> Vec3 {
-    // Current speed in the desired direction.
-    let current_speed = velocity.dot(direction);
-
-    // No acceleration is needed if current speed exceeds target.
-    if current_speed >= target_speed {
-        return Vec3::ZERO;
-    }
-
-    // Proposed acceleration.
-    let accel_speed = f32::min(target_speed - current_speed, max_acceleration * delta);
-    let mut accel = accel_speed * direction;
-
-    // No braking or clamping is needed if the velocity is almost zero.
-    if velocity.length_squared() < 1e-6 {
-        return accel;
-    }
-
-    // Reverse braking.
-    if current_speed < 0.0 && brake_factor.reverse.abs() > 0.0 {
-        let rev_brake_speed = f32::min(
-            max_acceleration * brake_factor.reverse * delta,
-            -current_speed,
-        );
-        accel += rev_brake_speed * direction;
-    }
-
-    // Leteral braking.
-    if brake_factor.lateral.abs() > 0.0 {
-        let perp_vel = velocity - current_speed * direction;
-        accel -= perp_vel.clamp_length_max(max_acceleration * brake_factor.lateral * delta);
-    }
-
-    let new_vel = velocity + accel;
-
-    // No clamping is needed if the new speed does not exceed the target speed.
-    if new_vel.length_squared() <= target_speed * target_speed {
-        return accel;
-    }
-
-    // Decompose acceleration into parallel/perpendicular components.
-    let speed = velocity.length();
-    let vel_dir = velocity / speed;
-
-    let par_speed = accel.dot(vel_dir);
-    let perp_accel = accel - par_speed * vel_dir;
-
-    // Clamp parallel acceleration to stay under the target speed.
-    let max_par_speed = f32::max(0.0, target_speed - speed);
-    let par_accel = f32::min(max_par_speed, par_speed) * vel_dir;
-
-    perp_accel + par_accel
 }

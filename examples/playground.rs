@@ -177,7 +177,6 @@ fn setup(
     // physics mover
     commands.spawn((
         AnimatedPlatform,
-        PhysicsMover,
         RigidBody::Kinematic,
         Transform::from_xyz(-20.0, 1.0, 0.0),
         Collider::from(cube),

@@ -1,6 +1,5 @@
 use std::{f32::consts::PI, fmt::Debug};
 
-use avian3d::prelude::*;
 use bevy::prelude::*;
 
 #[derive(Component, Reflect, Debug, Clone, Copy)]
