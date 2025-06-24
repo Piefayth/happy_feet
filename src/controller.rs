@@ -2,15 +2,9 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 
 use crate::{
-    Character,
     collision::{
-        CharacterCollisionFlags, CharacterMoveResult, MovementState, SweepPass, execute_sweep_pass,
-    },
-    debug::MovementDebugConfig,
-    debug_log,
-    ground::{Ground, GroundingConfig, NonWalkableMode},
-    stepping::{SteppingBehaviour, SteppingConfig},
-    sweep::{CollideAndSlideConfig, SweepHitData},
+        execute_sweep_pass, CharacterCollisionFlags, CharacterMoveResult, MovementState, SweepPass
+    }, debug::MovementDebugConfig, debug_log, ground::{Ground, GroundingConfig, NonWalkableMode}, movement::feet_position, stepping::{SteppingBehaviour, SteppingConfig}, sweep::{CollideAndSlideConfig, SweepHitData}, Character
 };
 
 /// A simple character controller data structure for movement calculations.
@@ -499,64 +493,54 @@ impl<'a> CharacterController<'a> {
         if had_collision && displacement.dot(*self.character.up) <= 0.0 {
             collision_down = true;
         }
+        debug_log!(
+            self.debug_config,
+            "  DOWN PASS RESULTS: validate_triangle_down={}, hit_non_walkable={}, ground={:?}",
+            movement_state.validate_triangle_down,
+            movement_state.hit_non_walkable,
+            movement_state.ground
+        );
 
-        // Triangle height validation
+        // We hit something below us, is it walkable?
         if movement_state.validate_triangle_down {
             let max_slope = self
                 .grounding_config
                 .as_ref()
                 .map_or(std::f32::consts::FRAC_PI_4, |g| g.max_angle);
 
-            // First, check if the slope itself is too steep. This is our simple check from before.
             let is_steep_slope = test_slope(
                 movement_state.contact_normal_down_pass,
                 *self.character.up,
                 max_slope,
             );
 
-            if is_steep_slope {
-                // PhysX can get the actual triangle hit and derive a height that way
-                // We can't do that, so to get an accurate height, we are going to raycast from above the point of contact
-                // To get an object height.
+            let contact_height = movement_state.touched_obstacle_height;
+            let feet_height = original_bottom_point;
+            let step_threshold = slope_validation_step_offset;
+            
+            debug_log!(
+                self.debug_config,
+                "  SLOPE VALIDATION: normal={:?}, angle={:.3}°, max={:.3}°, is_steep={}, contact_height={:.6}, feet_height={:.6}, step_threshold={:.6}",
+                movement_state.contact_normal_down_pass,
+                movement_state
+                    .contact_normal_down_pass
+                    .angle_between(*self.character.up)
+                    .to_degrees(),
+                max_slope.to_degrees(),
+                is_steep_slope,
+                contact_height,
+                feet_height,
+                step_threshold
+            );
 
-                // 1. Get the initial contact point from the main down sweep.
-                let contact_point = movement_state.current_position
-                    + (movement_state.contact_normal_down_pass * self.config.skin_width); // A reasonable approximation of the hit point
+            let step_is_too_high = contact_height > feet_height + step_threshold;
+            let step_was_attempted = auto_step_offset > 0.0;
 
-                // 2. Define the starting position for our verification ray, lifted up by the step offset.
-                let vertical_offset = *self.character.up * (slope_validation_step_offset + 0.05); // Add a small buffer
-                let ray_start = contact_point + vertical_offset;
-
-                // 3. Cast a short ray straight down from the elevated position.
-                let ray_dir = Dir3::new(-*self.character.up).unwrap_or(Dir3::NEG_Y);
-                let max_toi = slope_validation_step_offset + 0.1; // Ray just needs to be slightly longer than the offset
-
-                if let Some(hit) = self.spatial_query.cast_ray(
-                    ray_start,
-                    ray_dir,
-                    max_toi, // max_distance
-                    true,    // solid
-                    &self.filter,
-                ) {
-                    let hit_point = ray_start + (*ray_dir * hit.distance);
-                    // 4. Calculate the height of the obstacle relative to the character's starting position.
-                    let obstacle_height = hit_point.dot(*self.character.up);
-                    let obstacle_height_above_feet = obstacle_height - original_bottom_point;
-
-                    // 5. If this accurate height is greater than the step offset, it's a non-walkable wall.
-                    if obstacle_height_above_feet > slope_validation_step_offset {
-                        movement_state.hit_non_walkable = true;
-                        movement_state.touched_obstacle_height = obstacle_height;
-
-                        debug_log!(
-                            self.debug_config,
-                            "Hit non-walkable from VERIFICATION CAST: Accurate obstacle height {:.3} > step offset {:.3}",
-                            obstacle_height_above_feet,
-                            slope_validation_step_offset
-                        );
-                    }
-                }
-            }
+            // ?? alternative to if(touchedTriHeight>mUserParams.mStepOffset && testSlope(Normal, upDirection, mUserParams.mSlopeLimit))
+            // PhysX reads like it lets you step up onto steep slopes but I'm not convinced I like that
+            if step_is_too_high && is_steep_slope {
+                movement_state.hit_non_walkable = true;
+            } 
         }
 
         // If we're in walk experiment mode, perform the PhysX recovery sweep

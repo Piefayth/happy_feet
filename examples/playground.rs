@@ -1,4 +1,4 @@
-use std::f32::consts::PI;
+use std::f32::consts::{FRAC_PI_4, PI};
 
 use avian3d::prelude::*;
 use bevy::{
@@ -9,9 +9,7 @@ use bevy::{
 use bevy_enhanced_input::prelude::*;
 use bevy_skein::SkeinPlugin;
 use happy_feet::{
-    debug::{DebugInput, DebugMode, DebugMotion},
-    movement::jump,
-    prelude::*,
+    debug::{DebugInput, DebugMode, DebugMotion}, ground::NonWalkableMode, movement::jump, prelude::*
 };
 
 fn main() -> AppExit {
@@ -222,12 +220,13 @@ fn setup(
             },
             SteppingBehaviour::Always,
             GroundingConfig {
-                max_angle: PI / 4.0 + 0.1,
+                max_angle: FRAC_PI_4 + 0.1,
                 max_distance: 0.2,
                 ..Default::default()
             },
             CollideAndSlideConfig {
                 skin_width: 0.1,
+                slide_mode: NonWalkableMode::PreventClimbing,
                 ..Default::default()
             },
         ),
