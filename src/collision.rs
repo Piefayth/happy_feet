@@ -237,9 +237,7 @@ pub fn execute_sweep_pass(
                         let ground = Ground::new(hit.entity, hit.normal);
                         state.ground = Some(ground);
                     }
-
-                    // Equivalent of PhysX triangle height tracking for slope validation
-                    // We get the actual height for free from our hit!
+                    
                     state.touched_obstacle_height = hit.point.dot(*up_direction);
                 }
                 SweepPass::Side => {

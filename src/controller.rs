@@ -173,7 +173,7 @@ impl<'a> CharacterController<'a> {
 
             self.position = original_position;
 
-            let mut retry_result = self.execute_movement_attempt(
+            let retry_result = self.execute_movement_attempt(
                 modified_displacement,
                 auto_step_offset,
                 slope_validation_step_offset,
@@ -184,9 +184,6 @@ impl<'a> CharacterController<'a> {
             );
 
             final_movement_state = retry_result;
-
-            // // Even if we got forced into recovery, we still hit something non-walkable. Is this right? Or do we sometimes recover OUT of the non-walkable state
-            // final_movement_state.hit_non_walkable = did_hit_non_walkable;
         }
 
         let collision_flags = CharacterCollisionFlags {
@@ -443,7 +440,7 @@ impl<'a> CharacterController<'a> {
         }
 
         // Side collision slope validation
-        if !is_walk_experiment && !is_moving_up && movement_state.validate_triangle_side {
+        if !is_walk_experiment && movement_state.validate_triangle_side {
             let max_slope_angle = self
                 .grounding_config
                 .as_ref()
@@ -456,18 +453,14 @@ impl<'a> CharacterController<'a> {
             );
 
             if slope_is_unwalkable {
-                let start_height = self.position.dot(*self.character.up);
-                let current_height = movement_state.current_position.dot(*self.character.up);
-                let height_gained = current_height - start_height;
-
-                if height_gained > 1e-6 {
-                    movement_state.hit_non_walkable = true;
-                    debug_log!(
-                        self.debug_config,
-                        "HIT NON-WALKABLE: Gained height ({:.6}) while sliding on an unwalkable slope. Triggering walk experiment.",
-                        height_gained
-                    );
-                }
+                movement_state.hit_non_walkable = true;
+                debug_log!(
+                    self.debug_config,
+                    "HIT NON-WALKABLE: Side pass hit an unwalkable slope at height {:.3}, which is > character bottom {:.3} + step offset {:.3}",
+                    movement_state.contact_point_height,
+                    original_bottom_point,
+                    slope_validation_step_offset
+                );
             }
         }
 
@@ -508,28 +501,61 @@ impl<'a> CharacterController<'a> {
         }
 
         // Triangle height validation
-        if movement_state.validate_triangle_down && has_horizontal_motion {
+        if movement_state.validate_triangle_down {
             let max_slope = self
                 .grounding_config
                 .as_ref()
                 .map_or(std::f32::consts::FRAC_PI_4, |g| g.max_angle);
-            let obstacle_height_above_feet =
-                movement_state.touched_obstacle_height - original_bottom_point;
 
-            if obstacle_height_above_feet > slope_validation_step_offset
-                && test_slope(
-                    movement_state.contact_normal_down_pass,
-                    *self.character.up,
-                    max_slope,
-                )
-            {
-                movement_state.hit_non_walkable = true;
-                debug_log!(
-                    self.debug_config,
-                    "Hit non-walkable: obstacle height {:.3} > step offset {:.3} and slope too steep",
-                    obstacle_height_above_feet,
-                    slope_validation_step_offset
-                );
+            // First, check if the slope itself is too steep. This is our simple check from before.
+            let is_steep_slope = test_slope(
+                movement_state.contact_normal_down_pass,
+                *self.character.up,
+                max_slope,
+            );
+
+            if is_steep_slope {
+                // PhysX can get the actual triangle hit and derive a height that way
+                // We can't do that, so to get an accurate height, we are going to raycast from above the point of contact
+                // To get an object height.
+
+                // 1. Get the initial contact point from the main down sweep.
+                let contact_point = movement_state.current_position
+                    + (movement_state.contact_normal_down_pass * self.config.skin_width); // A reasonable approximation of the hit point
+
+                // 2. Define the starting position for our verification ray, lifted up by the step offset.
+                let vertical_offset = *self.character.up * (slope_validation_step_offset + 0.05); // Add a small buffer
+                let ray_start = contact_point + vertical_offset;
+
+                // 3. Cast a short ray straight down from the elevated position.
+                let ray_dir = Dir3::new(-*self.character.up).unwrap_or(Dir3::NEG_Y);
+                let max_toi = slope_validation_step_offset + 0.1; // Ray just needs to be slightly longer than the offset
+
+                if let Some(hit) = self.spatial_query.cast_ray(
+                    ray_start,
+                    ray_dir,
+                    max_toi, // max_distance
+                    true,    // solid
+                    &self.filter,
+                ) {
+                    let hit_point = ray_start + (*ray_dir * hit.distance);
+                    // 4. Calculate the height of the obstacle relative to the character's starting position.
+                    let obstacle_height = hit_point.dot(*self.character.up);
+                    let obstacle_height_above_feet = obstacle_height - original_bottom_point;
+
+                    // 5. If this accurate height is greater than the step offset, it's a non-walkable wall.
+                    if obstacle_height_above_feet > slope_validation_step_offset {
+                        movement_state.hit_non_walkable = true;
+                        movement_state.touched_obstacle_height = obstacle_height;
+
+                        debug_log!(
+                            self.debug_config,
+                            "Hit non-walkable from VERIFICATION CAST: Accurate obstacle height {:.3} > step offset {:.3}",
+                            obstacle_height_above_feet,
+                            slope_validation_step_offset
+                        );
+                    }
+                }
             }
         }
 
