@@ -5,7 +5,7 @@ use crate::{
     debug::MovementDebugConfig,
     debug_log,
     ground::{Ground, GroundingConfig, is_walkable},
-    sweep::{SweepHitData, sweep},
+    sweep::{CollideAndSlideConfig, SweepHitData, sweep},
 };
 
 /// Collision flags returned by character movement, matching PhysX API
@@ -78,8 +78,7 @@ pub struct MovementState {
     pub contact_normal_down_pass: Vec3,
     pub contact_point_height: f32,
     pub walk_experiment: bool,
-    pub touched_tri_min: f32,
-    pub touched_tri_max: f32,
+    pub touched_obstacle_height: f32,
     pub prevent_vertical_motion: bool,
     pub normalize_response: bool,
 }
@@ -99,8 +98,7 @@ impl MovementState {
             contact_normal_down_pass: Vec3::ZERO,
             contact_point_height: 0.0,
             walk_experiment: false,
-            touched_tri_min: 0.0,
-            touched_tri_max: 0.0,
+            touched_obstacle_height: 0.0,
             prevent_vertical_motion: false,
             normalize_response: true,
         }
@@ -121,12 +119,13 @@ impl MovementState {
 pub fn execute_sweep_pass(
     state: &mut MovementState,
     pass_type: SweepPass,
-    max_iterations: u32,
+    max_iterations: u8,
     min_distance: f32,
     original_bottom_point: f32,
     collider: &Collider,
     rotation: Quat,
     grounding_config: Option<&GroundingConfig>,
+    config: &CollideAndSlideConfig,
     spatial_query: &SpatialQuery,
     filter: &SpatialQueryFilter,
     up_direction: Dir3,
@@ -217,32 +216,13 @@ pub fn execute_sweep_pass(
         state.current_position += *current_direction * safe_distance;
 
         let mut effective_normal = hit.normal;
-
-        // Key PhysX walk experiment logic: flatten collision normal during walk experiment
-        if state.walk_experiment || state.prevent_vertical_motion {
-            // This is the exact PhysX behavior:
-            // "cancel out normal compo" - remove the vertical component from the collision normal
-            let normal_component = hit.normal.project_onto(*up_direction);
+        if state.walk_experiment && pass_type == SweepPass::Side {
+            // This is a walk experiment retry on a steep slope.
+            // Flatten the normal to prevent climbing from the side pass.
+            let normal_component = hit.normal.project_onto(state.up.into());
             let tangent_component = hit.normal - normal_component;
-
             if tangent_component.length_squared() > 1e-6 {
                 effective_normal = tangent_component.normalize();
-
-                debug_log!(
-                    debug_config,
-                    "    {} WALK EXPERIMENT: Flattened collision normal from {:?} to {:?}",
-                    pass_label,
-                    hit.normal,
-                    effective_normal
-                );
-            } else {
-                // If tangent component is too small, use a safe fallback
-                effective_normal = Vec3::ZERO;
-                debug_log!(
-                    debug_config,
-                    "    {} WALK EXPERIMENT: Normal completely vertical, using zero normal",
-                    pass_label
-                );
             }
         }
 
@@ -258,10 +238,9 @@ pub fn execute_sweep_pass(
                         state.ground = Some(ground);
                     }
 
-                    // PhysX triangle height tracking for slope validation
-                    let cache_center_y = state.current_position.dot(*up_direction);
-                    state.touched_tri_min = hit.point.dot(*up_direction) - cache_center_y;
-                    state.touched_tri_max = hit.point.dot(*up_direction) - cache_center_y;
+                    // Equivalent of PhysX triangle height tracking for slope validation
+                    // We get the actual height for free from our hit!
+                    state.touched_obstacle_height = hit.point.dot(*up_direction);
                 }
                 SweepPass::Side => {
                     state.validate_triangle_side = true;
@@ -285,17 +264,7 @@ pub fn execute_sweep_pass(
         }
 
         // PhysX collision response - modify target_orientation for next iteration
-        if effective_normal.length_squared() > 1e-6 {
-            physx_collision_response(state, *current_direction, effective_normal);
-        } else {
-            // If normal is zero (completely vertical), stop all movement
-            state.target_orientation = state.current_position;
-            debug_log!(
-                debug_config,
-                "    {} No collision response - zero effective normal",
-                pass_label
-            );
-        }
+        physx_collision_response(state, *current_direction, effective_normal);
     }
 
     debug_log!(
@@ -308,6 +277,37 @@ pub fn execute_sweep_pass(
 
     had_collision
 }
+
+/// PhysX-style collision response that modifies the target orientation
+/// This is the core collision response algorithm from PhysX CCT
+// fn physx_collision_response(
+//     state: &mut MovementState,
+//     current_direction: Vec3,
+//     // This is the "effective normal" passed in by the caller.
+//     hit_normal: Vec3,
+// ) {
+//     let amplitude = (state.target_orientation - state.current_position).length();
+
+//     if amplitude < 1e-6 {
+//         return;
+//     }
+
+//     // The logic to flatten the normal is now handled by the caller.
+//     // This function just performs the response with the given normal.
+//     let reflect_dir = current_direction - hit_normal * 2.0 * current_direction.dot(hit_normal);
+//     let reflect_dir = reflect_dir.normalize_or_zero();
+
+//     let normal_component = reflect_dir.project_onto(hit_normal);
+//     let tangent_component = reflect_dir - normal_component;
+
+//     let friction = 1.0;
+
+//     state.target_orientation = state.current_position;
+
+//     if friction != 0.0 {
+//         state.target_orientation += tangent_component * friction * amplitude;
+//     }
+// }
 
 fn physx_collision_response(state: &mut MovementState, current_direction: Vec3, hit_normal: Vec3) {
     let amplitude = (state.target_orientation - state.current_position).length();

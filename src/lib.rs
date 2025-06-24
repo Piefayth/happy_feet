@@ -206,7 +206,7 @@ pub(crate) fn character_movement_system(
         );
 
         // Create the unified controller
-        let controller = CharacterController::new(
+        let mut controller = CharacterController::new(
             transform.translation,
             transform.rotation,
             *character,

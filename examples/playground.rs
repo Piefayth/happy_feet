@@ -206,6 +206,7 @@ fn setup(
 
     commands.spawn((
         Name::new("Player"),
+        TransformInterpolation,
         MovementMode::Walking,
         (
             Character::default(),

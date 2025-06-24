@@ -60,7 +60,7 @@ impl<'a> CharacterController<'a> {
 
     /// The core PhysX-style character movement function.
     /// This is the "black box" equivalent to PhysX's Controller::move().
-    pub fn move_character(&self, desired_displacement: Vec3) -> CharacterMoveResult {
+    pub fn move_character(&mut self, desired_displacement: Vec3) -> CharacterMoveResult {
         debug_log!(self.debug_config, "=== CHARACTER MOVE START ===");
         debug_log!(
             self.debug_config,
@@ -79,7 +79,6 @@ impl<'a> CharacterController<'a> {
         let original_height = self.position.dot(*self.character.up);
         let half_height = self.collider.aabb(Vec3::ZERO, Quat::IDENTITY).size().y / 2.0;
         let original_bottom_point = original_height - half_height;
-
         // Determine if we should auto-step based on grounding and movement
         let is_grounded = self.current_ground.is_some();
 
@@ -119,6 +118,8 @@ impl<'a> CharacterController<'a> {
             auto_step_offset
         );
 
+        let original_position = self.position;
+
         // Continue with the rest of the movement logic...
         let mut final_movement_state = self.execute_movement_attempt(
             desired_displacement,
@@ -130,6 +131,7 @@ impl<'a> CharacterController<'a> {
             original_bottom_point,
         );
 
+        let did_hit_non_walkable = final_movement_state.hit_non_walkable;
         // Walk experiment retry if needed
         if final_movement_state.hit_non_walkable {
             debug_log!(
@@ -138,19 +140,20 @@ impl<'a> CharacterController<'a> {
             );
 
             // PhysX-style displacement modification based on non-walkable mode
-            let modified_displacement = match self
-                .grounding_config
-                .as_ref()
-                .map(|g| g.non_walkable_mode)
-                .unwrap_or(NonWalkableMode::PreventClimbing)
-            {
+            let modified_displacement = match self.config.slide_mode {
                 NonWalkableMode::PreventClimbingAndForceSliding => {
-                    // Use only horizontal component - removes all vertical climbing
+                    // CRITICAL FIX: PhysX decomposes into (xpDisp, tangent_compo)
+                    // where xpDisp gets the VERTICAL component, not horizontal!
+                    // This is counter-intuitive but matches the PhysX code exactly
+                    let (vertical_component, _horizontal_component) =
+                        decompose_displacement(desired_displacement, self.character.up);
+
                     debug_log!(
                         self.debug_config,
-                        "WALK EXPERIMENT: Using horizontal-only displacement (force sliding mode)"
+                        "WALK EXPERIMENT: Using vertical-only displacement (force sliding mode): {:?}",
+                        vertical_component
                     );
-                    horizontal_component
+                    vertical_component // This removes horizontal climbing forces
                 }
                 NonWalkableMode::PreventClimbing => {
                     // Use original displacement with modified collision response
@@ -161,7 +164,6 @@ impl<'a> CharacterController<'a> {
                     desired_displacement
                 }
             };
-
             debug_log!(
                 self.debug_config,
                 "WALK EXPERIMENT: Modified displacement: {:?} (was: {:?})",
@@ -169,7 +171,9 @@ impl<'a> CharacterController<'a> {
                 desired_displacement
             );
 
-            let retry_result = self.execute_movement_attempt(
+            self.position = original_position;
+
+            let mut retry_result = self.execute_movement_attempt(
                 modified_displacement,
                 auto_step_offset,
                 slope_validation_step_offset,
@@ -180,6 +184,9 @@ impl<'a> CharacterController<'a> {
             );
 
             final_movement_state = retry_result;
+
+            // // Even if we got forced into recovery, we still hit something non-walkable. Is this right? Or do we sometimes recover OUT of the non-walkable state
+            // final_movement_state.hit_non_walkable = did_hit_non_walkable;
         }
 
         let collision_flags = CharacterCollisionFlags {
@@ -203,7 +210,7 @@ impl<'a> CharacterController<'a> {
             final_position: final_movement_state.current_position,
             collision_flags,
             ground: final_movement_state.ground,
-            hit_non_walkable: final_movement_state.hit_non_walkable,
+            hit_non_walkable: did_hit_non_walkable, // use the ORIGINAL did_hit_non_walkable state
             actual_displacement,
         }
     }
@@ -241,13 +248,6 @@ impl<'a> CharacterController<'a> {
                 "Hit non-walkable surface - checking if this was gravity-induced motion"
             );
 
-            // The key insight: we need to distinguish between player-intended motion
-            // and gravity-induced motion that got redirected horizontally.
-
-            // If the character has significant horizontal velocity but very little
-            // horizontal displacement occurred, it means the walk experiment
-            // prevented the unwanted motion - we should reduce velocity accordingly.
-
             let horizontal_speed = horizontal_velocity.length();
             let horizontal_displacement = {
                 let horizontal_actual = move_result
@@ -256,9 +256,7 @@ impl<'a> CharacterController<'a> {
                 horizontal_actual.length()
             };
 
-            // If we had horizontal velocity but achieved little horizontal movement,
-            // it means we hit a steep slope and the walk experiment stopped us
-            if horizontal_speed > 0.5 && horizontal_displacement < horizontal_speed * 0.2 {
+            if horizontal_speed > 1e-6 && horizontal_displacement < horizontal_speed * 0.2 {
                 // This indicates gravity-induced motion that was blocked
                 // Reduce horizontal velocity significantly to prevent sliding
                 horizontal_velocity *= 0.1;
@@ -365,6 +363,23 @@ impl<'a> CharacterController<'a> {
         let mut collision_sides = false;
         let mut collision_down = false;
 
+        let max_iter = self.config.max_iterations;
+        let max_iter_side = max_iter;
+        let max_iter_up = if side_vector.is_some_and(|it| it.length().abs() < 0.001) {
+            max_iter
+        } else {
+            1
+        };
+        let max_iter_down = if is_walk_experiment
+            && matches!(
+                self.config.slide_mode,
+                NonWalkableMode::PreventClimbingAndForceSliding
+            ) {
+            10
+        } else {
+            1
+        };
+
         // PASS 1: UP (skipped in walk experiment)
         if let Some(up_motion) = up_vector {
             if !is_walk_experiment {
@@ -373,12 +388,13 @@ impl<'a> CharacterController<'a> {
                 let had_collision = execute_sweep_pass(
                     &mut movement_state,
                     SweepPass::Up,
-                    1,
+                    max_iter_up,
                     min_distance,
                     original_bottom_point,
                     &self.collider,
                     self.rotation,
                     self.grounding_config.as_ref(),
+                    &self.config,
                     &self.spatial_query,
                     &self.filter,
                     self.character.up,
@@ -407,12 +423,13 @@ impl<'a> CharacterController<'a> {
             let had_collision = execute_sweep_pass(
                 &mut movement_state,
                 SweepPass::Side,
-                4,
+                max_iter_side,
                 min_distance,
                 original_bottom_point,
                 &self.collider,
                 self.rotation,
                 self.grounding_config.as_ref(),
+                &self.config,
                 &self.spatial_query,
                 &self.filter,
                 self.character.up,
@@ -472,12 +489,13 @@ impl<'a> CharacterController<'a> {
         let had_collision = execute_sweep_pass(
             &mut movement_state,
             SweepPass::Down,
-            1,
+            max_iter_down,
             min_distance,
             original_bottom_point,
             &self.collider,
             self.rotation,
             self.grounding_config.as_ref(),
+            &self.config,
             &self.spatial_query,
             &self.filter,
             self.character.up,
@@ -495,9 +513,10 @@ impl<'a> CharacterController<'a> {
                 .grounding_config
                 .as_ref()
                 .map_or(std::f32::consts::FRAC_PI_4, |g| g.max_angle);
-            let touched_tri_height = movement_state.touched_tri_max - original_bottom_point;
+            let obstacle_height_above_feet =
+                movement_state.touched_obstacle_height - original_bottom_point;
 
-            if touched_tri_height > slope_validation_step_offset
+            if obstacle_height_above_feet > slope_validation_step_offset
                 && test_slope(
                     movement_state.contact_normal_down_pass,
                     *self.character.up,
@@ -507,82 +526,82 @@ impl<'a> CharacterController<'a> {
                 movement_state.hit_non_walkable = true;
                 debug_log!(
                     self.debug_config,
-                    "Triangle slope validation failed - surface too steep. Tri height: {:.6}, step offset: {:.6}",
-                    touched_tri_height,
+                    "Hit non-walkable: obstacle height {:.3} > step offset {:.3} and slope too steep",
+                    obstacle_height_above_feet,
                     slope_validation_step_offset
                 );
-
-                // If we're in walk experiment mode, perform the PhysX recovery sweep
-                if movement_state.walk_experiment {
-                    debug_log!(
-                        self.debug_config,
-                        "RECOVERY SWEEP: Performing PhysX-style recovery sweep for steep slope sliding"
-                    );
-
-                    // Set PhysX normalize response flag for recovery sweep
-                    movement_state.normalize_response = true;
-                    movement_state.prevent_vertical_motion = true;
-
-                    // Calculate recovery distance (PhysX logic)
-                    let current_height = movement_state.current_position.dot(*self.character.up);
-                    let original_height = self.position.dot(*self.character.up);
-                    let mut delta = if current_height > original_height {
-                        current_height - original_height
-                    } else {
-                        0.0
-                    };
-                    delta += displacement.dot(*self.character.up).abs();
-                    let recover_distance = delta;
-
-                    // Create downward recovery vector
-                    let recovery_vector = -*self.character.up * recover_distance;
-
-                    debug_log!(
-                        self.debug_config,
-                        "RECOVERY SWEEP: delta={:.6}, recover_distance={:.6}, recovery_vector={:?}",
-                        delta,
-                        recover_distance,
-                        recovery_vector
-                    );
-
-                    // Set target for recovery sweep
-                    movement_state.target_orientation =
-                        movement_state.current_position + recovery_vector;
-
-                    // Execute the recovery sweep with multiple iterations (this is the key!)
-                    let recovery_min_dist = if recover_distance < min_distance {
-                        recover_distance / 4.0 // PhysX uses maxIter here, we use 4
-                    } else {
-                        min_distance
-                    };
-
-                    execute_sweep_pass(
-                        &mut movement_state,
-                        SweepPass::Down, // PhysX uses SWEEP_PASS_UP for compatibility, but it's technically a down pass
-                        4,               // Multiple iterations for proper sliding!
-                        recovery_min_dist,
-                        original_bottom_point,
-                        &self.collider,
-                        self.rotation,
-                        self.grounding_config.as_ref(),
-                        &self.spatial_query,
-                        &self.filter,
-                        self.character.up,
-                        self.config.skin_width,
-                        self.debug_config,
-                    );
-
-                    // Clear the normalize response flag
-                    movement_state.normalize_response = false;
-                    movement_state.prevent_vertical_motion = false;
-
-                    debug_log!(
-                        self.debug_config,
-                        "RECOVERY SWEEP: Final position after recovery: {:?}",
-                        movement_state.current_position
-                    );
-                }
             }
+        }
+
+        // If we're in walk experiment mode, perform the PhysX recovery sweep
+        if movement_state.hit_non_walkable && movement_state.walk_experiment {
+            debug_log!(
+                self.debug_config,
+                "RECOVERY SWEEP: Performing PhysX-style recovery sweep for steep slope sliding"
+            );
+
+            // Set PhysX normalize response flag for recovery sweep
+            movement_state.normalize_response = true;
+            movement_state.prevent_vertical_motion = true;
+
+            // Calculate recovery distance (PhysX logic)
+            let current_height = movement_state.current_position.dot(*self.character.up);
+            let original_height = self.position.dot(*self.character.up);
+            let mut delta = if current_height > original_height {
+                current_height - original_height
+            } else {
+                0.0
+            };
+            delta += displacement.dot(*self.character.up).abs();
+            let recover_distance = delta;
+
+            // Create downward recovery vector
+            let recovery_vector = -*self.character.up * recover_distance;
+
+            debug_log!(
+                self.debug_config,
+                "RECOVERY SWEEP: delta={:.6}, recover_distance={:.6}, recovery_vector={:?}",
+                delta,
+                recover_distance,
+                recovery_vector
+            );
+
+            // Set target for recovery sweep
+            movement_state.target_orientation = movement_state.current_position + recovery_vector;
+
+            // Execute the recovery sweep with multiple iterations (this is the key!)
+            let recovery_min_dist = if recover_distance < min_distance {
+                recover_distance / max_iter as f32
+            } else {
+                min_distance
+            };
+
+            execute_sweep_pass(
+                &mut movement_state,
+                SweepPass::Down, // PhysX uses SWEEP_PASS_UP for compatibility, but it's technically a down pass
+                max_iter,
+                recovery_min_dist,
+                original_bottom_point,
+                &self.collider,
+                self.rotation,
+                self.grounding_config.as_ref(),
+                &self.config,
+                &self.spatial_query,
+                &self.filter,
+                self.character.up,
+                self.config.skin_width,
+                self.debug_config,
+            );
+
+            // Clear the normalize response flag
+            movement_state.normalize_response = false;
+            movement_state.prevent_vertical_motion = false;
+
+            debug_log!(
+                self.debug_config,
+                "RECOVERY SWEEP: Final position after recovery: {:?}",
+                movement_state.current_position
+            );
         }
 
         // Store collision flags

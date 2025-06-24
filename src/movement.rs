@@ -45,25 +45,37 @@ pub(crate) fn character_friction(
     colliders: Query<&ColliderOf>,
     time: Res<Time>,
 ) {
+    // You can tune this constant to get the desired air resistance effect.
+    // A smaller value like 0.1-0.3 often works well for light drag.
+    const DEFAULT_AIR_FRICTION: f32 = 0.8;
+
     for (mut velocity, grounding, character_friction) in &mut characters {
-        let Some(ground) = grounding.ground() else {
-            continue;
+        // Determine the friction value based on whether the character is grounded or airborne.
+        let friction = if let Some(ground) = grounding.ground() {
+            // --- Grounded State ---
+            // Start with the character's base ground friction.
+            let mut ground_friction = character_friction.0;
+
+            // Check the ground entity for a `FrictionScale` and apply it.
+            if let Ok(scale) = frictions.get(ground.entity) {
+                ground_friction *= scale.0;
+            } else if let Ok(collider_of) = colliders.get(ground.entity) {
+                // If not on the collider, check the parent body it's attached to.
+                if let Ok(scale) = frictions.get(collider_of.body) {
+                    ground_friction *= scale.0;
+                }
+            }
+            ground_friction
+        } else {
+            // --- Airborne State ---
+            // Not on the ground, so apply a constant air friction.
+            DEFAULT_AIR_FRICTION
         };
 
-        let mut friction = character_friction.0;
-
-        // Multiply friction by the friction scale
-        if let Ok(s) = frictions.get(ground.entity) {
-            friction *= s.0;
-        } else if let Ok(collider_of) = colliders.get(ground.entity) {
-            if let Ok(s) = frictions.get(collider_of.body) {
-                friction *= s.0;
-            }
-        }
-
-        let f = friction_factor(velocity.0, friction, time.delta_secs());
-
-        velocity.0 *= f;
+        // Apply the calculated friction to the character's velocity.
+        // This assumes you have a `friction_factor` function defined.
+        let factor = friction_factor(velocity.0, friction, time.delta_secs());
+        velocity.0 *= factor;
     }
 }
 

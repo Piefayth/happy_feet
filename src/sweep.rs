@@ -2,7 +2,7 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 
 use crate::{
-    CollideAndSlideFilter,
+    ground::NonWalkableMode, CollideAndSlideFilter
 };
 
 #[derive(Reflect, Debug, Clone, Copy)]
@@ -58,13 +58,15 @@ pub(crate) fn sweep(
 pub struct CollideAndSlideConfig {
     pub max_iterations: u8,
     pub skin_width: f32,
+    pub slide_mode: NonWalkableMode
 }
 
 impl Default for CollideAndSlideConfig {
     fn default() -> Self {
         Self {
-            max_iterations: 4,
+            max_iterations: 10,
             skin_width: 0.1,
+            slide_mode: NonWalkableMode::PreventClimbing,
         }
     }
 }
