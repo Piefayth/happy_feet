@@ -128,10 +128,11 @@ impl Ground {
         normal: impl TryInto<Dir3>,
         up: Dir3,
         walkable_angle: f32,
+        mode: NonWalkableMode,
     ) -> Option<Self> {
         let normal = normal.try_into().ok()?;
 
-        if !is_walkable(*normal, walkable_angle, *up) {
+        if !is_walkable(*normal, walkable_angle, *up, mode) {
             return None;
         }
 
@@ -139,7 +140,15 @@ impl Ground {
     }
 }
 
+pub(crate) fn is_walkable(
+    normal: Vec3,
+    walkable_angle: f32,
+    up: Vec3,
+    mode: NonWalkableMode,
+) -> bool {
+    if matches!(mode, NonWalkableMode::PreventClimbing) {
+        return true;
+    }
 
-pub(crate) fn is_walkable(normal: Vec3, walkable_angle: f32, up: Vec3) -> bool {
     normal.angle_between(up) <= walkable_angle
 }

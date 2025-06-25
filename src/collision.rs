@@ -1,15 +1,14 @@
+use std::f32::consts::FRAC_PI_4;
+
 use avian3d::prelude::*;
 use bevy::prelude::*;
 
 use crate::{
-    debug::MovementDebugConfig,
-    debug_log,
-    ground::{Ground, GroundingConfig, is_walkable},
-    sweep::{CollideAndSlideConfig, SweepHitData, sweep},
+    controller::test_slope, debug::MovementDebugConfig, debug_log, ground::{is_walkable, Ground, GroundingConfig, NonWalkableMode}, sweep::{sweep, CollideAndSlideConfig, SweepHitData}
 };
 
 /// Collision flags returned by character movement, matching PhysX API
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CharacterCollisionFlags {
     pub up: bool,
     pub sides: bool,
@@ -70,7 +69,7 @@ pub struct MovementState {
     pub target_orientation: Vec3,
     pub up: Dir3,
     pub ground: Option<Ground>,
-    pub collision_flags: u32,
+    pub collision_flags: CharacterCollisionFlags,
     pub validate_triangle_down: bool,
     pub validate_triangle_side: bool,
     pub hit_non_walkable: bool,
@@ -90,7 +89,7 @@ impl MovementState {
             target_orientation: position,
             up: Dir3::Y,
             ground: None,
-            collision_flags: 0,
+            collision_flags: CharacterCollisionFlags::default(),
             validate_triangle_down: false,
             validate_triangle_side: false,
             hit_non_walkable: false,
@@ -191,7 +190,7 @@ pub fn execute_sweep_pass(
             skin_width,
             spatial_query,
             filter,
-            true, // ignore_origin_penetration - PhysX uses true for CCT
+            true,
         ) else {
             debug_log!(
                 debug_config,
@@ -199,6 +198,7 @@ pub fn execute_sweep_pass(
                 pass_label,
                 iteration
             );
+
             if max_distance > min_distance {
                 state.current_position = state.target_orientation;
             }
@@ -216,9 +216,13 @@ pub fn execute_sweep_pass(
         state.current_position += *current_direction * safe_distance;
 
         let mut effective_normal = hit.normal;
-        if state.walk_experiment && pass_type == SweepPass::Side {
+        // 		if(preventVerticalMotion || ((mFlags & STF_WALK_EXPERIMENT) && (mUserParams.mNonWalkableMode!=PxControllerNonWalkableMode::ePREVENT_CLIMBING_AND_FORCE_SLIDING)))
+        if state.walk_experiment
+            && pass_type == SweepPass::Side
+            && matches!(config.slide_mode, NonWalkableMode::PreventClimbing)
+        {
             // This is a walk experiment retry on a steep slope.
-            // Flatten the normal to prevent climbing from the side pass.
+            // Flatten the normal
             let normal_component = hit.normal.project_onto(state.up.into());
             let tangent_component = hit.normal - normal_component;
             if tangent_component.length_squared() > 1e-6 {
@@ -233,7 +237,7 @@ pub fn execute_sweep_pass(
                     state.validate_triangle_down = true;
                     state.contact_normal_down_pass = hit.normal;
 
-                    if is_walkable(hit.normal, grounding_config.max_angle, *up_direction) {
+                    if is_walkable(hit.normal, grounding_config.max_angle, *up_direction, config.slide_mode) {
                         let ground = Ground::new(hit.entity, hit.normal);
                         state.ground = Some(ground);
                     }
@@ -247,7 +251,7 @@ pub fn execute_sweep_pass(
 
                     debug_log!(
                         debug_config,
-                        "    {} SIDE HIT: normal={:?}, hit_point={:?}, contact_height={:.6}, character_pos={:?}",
+                        "    {} HIT: normal={:?}, hit_point={:?}, contact_height={:.6}, character_pos={:?}",
                         pass_label,
                         hit.normal,
                         hit.point,
@@ -275,37 +279,6 @@ pub fn execute_sweep_pass(
 
     had_collision
 }
-
-/// PhysX-style collision response that modifies the target orientation
-/// This is the core collision response algorithm from PhysX CCT
-// fn physx_collision_response(
-//     state: &mut MovementState,
-//     current_direction: Vec3,
-//     // This is the "effective normal" passed in by the caller.
-//     hit_normal: Vec3,
-// ) {
-//     let amplitude = (state.target_orientation - state.current_position).length();
-
-//     if amplitude < 1e-6 {
-//         return;
-//     }
-
-//     // The logic to flatten the normal is now handled by the caller.
-//     // This function just performs the response with the given normal.
-//     let reflect_dir = current_direction - hit_normal * 2.0 * current_direction.dot(hit_normal);
-//     let reflect_dir = reflect_dir.normalize_or_zero();
-
-//     let normal_component = reflect_dir.project_onto(hit_normal);
-//     let tangent_component = reflect_dir - normal_component;
-
-//     let friction = 1.0;
-
-//     state.target_orientation = state.current_position;
-
-//     if friction != 0.0 {
-//         state.target_orientation += tangent_component * friction * amplitude;
-//     }
-// }
 
 fn physx_collision_response(state: &mut MovementState, current_direction: Vec3, hit_normal: Vec3) {
     let amplitude = (state.target_orientation - state.current_position).length();

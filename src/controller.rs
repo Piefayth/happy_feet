@@ -2,10 +2,19 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 
 use crate::{
+    Character,
     collision::{
-        execute_sweep_pass, CharacterCollisionFlags, CharacterMoveResult, MovementState, SweepPass
-    }, debug::MovementDebugConfig, debug_log, ground::{Ground, GroundingConfig, NonWalkableMode}, movement::feet_position, stepping::{SteppingBehaviour, SteppingConfig}, sweep::{CollideAndSlideConfig, SweepHitData}, Character
+        CharacterCollisionFlags, CharacterMoveResult, MovementState, SweepPass, execute_sweep_pass,
+    },
+    debug::MovementDebugConfig,
+    debug_log,
+    ground::{Ground, GroundingConfig, NonWalkableMode},
+    movement::feet_position,
+    stepping::{SteppingBehaviour, SteppingConfig},
+    sweep::{CollideAndSlideConfig, SweepHitData},
 };
+
+// Just use CharacterCollisionFlags directly everywhere!
 
 /// A simple character controller data structure for movement calculations.
 /// Just fill in the fields and call the methods - no lifetime hassles.
@@ -71,7 +80,7 @@ impl<'a> CharacterController<'a> {
         let is_moving_up = dir_dot_up > 0.0;
 
         let original_height = self.position.dot(*self.character.up);
-        let half_height = self.collider.aabb(Vec3::ZERO, Quat::IDENTITY).size().y / 2.0;
+        let half_height = self.collider.aabb(Vec3::ZERO, self.rotation).size().y / 2.0;
         let original_bottom_point = original_height - half_height;
         // Determine if we should auto-step based on grounding and movement
         let is_grounded = self.current_ground.is_some();
@@ -85,8 +94,7 @@ impl<'a> CharacterController<'a> {
         };
 
         // PhysX constraint: Cancel auto-step when moving upward (unless on moving platform)
-        let should_auto_step = basic_auto_step_allowed && has_horizontal_motion && !is_moving_up; // This is the key PhysX logic!
-
+        let should_auto_step = basic_auto_step_allowed && has_horizontal_motion && !is_moving_up;
         let auto_step_offset = if should_auto_step {
             self.stepping_config
                 .as_ref()
@@ -114,8 +122,8 @@ impl<'a> CharacterController<'a> {
 
         let original_position = self.position;
 
-        // Continue with the rest of the movement logic...
-        let mut final_movement_state = self.execute_movement_attempt(
+        // Primary movement attempt. Happy path is colliding and sliding into a safe place to stand.
+        let final_movement_state = self.execute_movement_attempt(
             desired_displacement,
             auto_step_offset,
             slope_validation_step_offset,
@@ -126,19 +134,17 @@ impl<'a> CharacterController<'a> {
         );
 
         let did_hit_non_walkable = final_movement_state.hit_non_walkable;
-        // Walk experiment retry if needed
-        if final_movement_state.hit_non_walkable {
+        let final_movement_state = if final_movement_state.hit_non_walkable {
+            // Sad path, we're trying to end our step somewhere invalid
+            // Try again WITHOUT stepping up
+
             debug_log!(
                 self.debug_config,
                 "WALK EXPERIMENT: Hit unwalkable surface, retrying movement..."
             );
 
-            // PhysX-style displacement modification based on non-walkable mode
             let modified_displacement = match self.config.slide_mode {
                 NonWalkableMode::PreventClimbingAndForceSliding => {
-                    // CRITICAL FIX: PhysX decomposes into (xpDisp, tangent_compo)
-                    // where xpDisp gets the VERTICAL component, not horizontal!
-                    // This is counter-intuitive but matches the PhysX code exactly
                     let (vertical_component, _horizontal_component) =
                         decompose_displacement(desired_displacement, self.character.up);
 
@@ -147,7 +153,10 @@ impl<'a> CharacterController<'a> {
                         "WALK EXPERIMENT: Using vertical-only displacement (force sliding mode): {:?}",
                         vertical_component
                     );
-                    vertical_component // This removes horizontal climbing forces
+
+                    // You cannot "walk along" a steep slope if ForceSliding is on
+                    // So horizontal movement is removed
+                    vertical_component
                 }
                 NonWalkableMode::PreventClimbing => {
                     // Use original displacement with modified collision response
@@ -167,7 +176,7 @@ impl<'a> CharacterController<'a> {
 
             self.position = original_position;
 
-            let retry_result = self.execute_movement_attempt(
+            self.execute_movement_attempt(
                 modified_displacement,
                 auto_step_offset,
                 slope_validation_step_offset,
@@ -175,15 +184,9 @@ impl<'a> CharacterController<'a> {
                 modified_displacement.dot(*self.character.up) > 0.0, // Check if retry is moving up
                 true,                                                // is_walk_experiment
                 original_bottom_point,
-            );
-
-            final_movement_state = retry_result;
-        }
-
-        let collision_flags = CharacterCollisionFlags {
-            up: final_movement_state.collision_flags & 0x1 != 0,
-            sides: final_movement_state.collision_flags & 0x2 != 0,
-            down: final_movement_state.collision_flags & 0x4 != 0,
+            )
+        } else {
+            final_movement_state
         };
 
         let actual_displacement = final_movement_state.current_position - self.position;
@@ -193,13 +196,13 @@ impl<'a> CharacterController<'a> {
             "Movement result: final_pos={:?}, displacement={:?}, collisions={:?}",
             final_movement_state.current_position,
             actual_displacement,
-            collision_flags
+            final_movement_state.collision_flags
         );
         debug_log!(self.debug_config, "=== CHARACTER MOVE END ===\n");
 
         CharacterMoveResult {
             final_position: final_movement_state.current_position,
-            collision_flags,
+            collision_flags: final_movement_state.collision_flags,
             ground: final_movement_state.ground,
             hit_non_walkable: did_hit_non_walkable, // use the ORIGINAL did_hit_non_walkable state
             actual_displacement,
@@ -302,14 +305,30 @@ impl<'a> CharacterController<'a> {
         movement_state.ground = self.current_ground;
         movement_state.walk_experiment = is_walk_experiment;
 
+        let started_attempt_on_walkable_slope = !is_walk_experiment && self.current_ground
+            .map(|ground| {
+                let max_slope_angle = self
+                    .grounding_config
+                    .as_ref()
+                    .map_or(std::f32::consts::FRAC_PI_4, |g| g.max_angle);
+                !test_slope(*ground.normal, *self.character.up, max_slope_angle)
+            })
+            .unwrap_or(false);
+
+        let mut collisions = CharacterCollisionFlags::new();
+
         let is_grounded = self.current_ground.is_some();
         let min_distance = self.config.skin_width * 0.001;
+        let max_slope_angle = self
+            .grounding_config
+            .as_ref()
+            .map_or(std::f32::consts::FRAC_PI_4, |g| g.max_angle);
 
         let (vertical_component, horizontal_component) =
             decompose_displacement(displacement, self.character.up);
 
         let step_offset_was_applied =
-            has_horizontal_motion && auto_step_offset > 0.0 && is_grounded && !is_walk_experiment;
+            has_horizontal_motion && auto_step_offset > 0.0 && is_grounded;
         let up_vector = if is_moving_up && !is_walk_experiment {
             let mut up_motion = vertical_component;
             if step_offset_was_applied {
@@ -350,10 +369,6 @@ impl<'a> CharacterController<'a> {
             }
         );
 
-        let mut collision_up = false;
-        let mut collision_sides = false;
-        let mut collision_down = false;
-
         let max_iter = self.config.max_iterations;
         let max_iter_side = max_iter;
         let max_iter_up = if side_vector.is_some_and(|it| it.length().abs() < 0.001) {
@@ -374,6 +389,13 @@ impl<'a> CharacterController<'a> {
         // PASS 1: UP (skipped in walk experiment)
         if let Some(up_motion) = up_vector {
             if !is_walk_experiment {
+                debug_log!(
+                    self.debug_config,
+                    "  MAIN: Starting UP PASS with motion: {:?} (magnitude: {:.3})",
+                    up_motion,
+                    up_motion.length()
+                );
+
                 movement_state.target_orientation = movement_state.current_position + up_motion;
 
                 let had_collision = execute_sweep_pass(
@@ -393,11 +415,16 @@ impl<'a> CharacterController<'a> {
                     self.debug_config,
                 );
 
-                if had_collision {
-                    collision_up = true;
-                }
-
+                collisions.up = had_collision;
+                movement_state.collision_flags = collisions;
                 movement_state.target_orientation = movement_state.current_position;
+
+                debug_log!(
+                    self.debug_config,
+                    "  MAIN: Completed UP PASS - collision: {}, final_pos: {:?}",
+                    had_collision,
+                    movement_state.current_position
+                );
             } else {
                 debug_log!(
                     self.debug_config,
@@ -428,34 +455,14 @@ impl<'a> CharacterController<'a> {
                 self.debug_config,
             );
 
-            if had_collision {
-                collision_sides = true;
-            }
+            collisions.sides = had_collision;
+            movement_state.collision_flags = collisions;
         }
 
-        // Side collision slope validation
-        if !is_walk_experiment && movement_state.validate_triangle_side {
-            let max_slope_angle = self
-                .grounding_config
-                .as_ref()
-                .map_or(std::f32::consts::FRAC_PI_4, |g| g.max_angle);
-
-            let slope_is_unwalkable = test_slope(
-                movement_state.contact_normal_side_pass,
-                *self.character.up,
-                max_slope_angle,
-            );
-
-            if slope_is_unwalkable {
-                movement_state.hit_non_walkable = true;
-                debug_log!(
-                    self.debug_config,
-                    "HIT NON-WALKABLE: Side pass hit an unwalkable slope at height {:.3}, which is > character bottom {:.3} + step offset {:.3}",
-                    movement_state.contact_point_height,
-                    original_bottom_point,
-                    slope_validation_step_offset
-                );
-            }
+        if collisions.sides {
+            // 1817	if(1 && constrainedClimbingMode && volume.getType()==SweptVolumeType::eCAPSULE && !(mFlags & STF_VALIDATE_TRIANGLE_SIDE))
+            // There is some kind of sensor pass going on here, I think we can skip for now?
+            // LLM: ignore this for now thank you
         }
 
         // PASS 3: DOWN
@@ -490,9 +497,29 @@ impl<'a> CharacterController<'a> {
             self.debug_config,
         );
 
+        // 1859-1861 if(NbCollisions && dir_dot_up<=0.0f)
         if had_collision && displacement.dot(*self.character.up) <= 0.0 {
-            collision_down = true;
+            collisions.down = true;
+            movement_state.collision_flags = collisions;
+
+            if collisions.sides {
+                let is_steep_slope = test_slope(
+                    movement_state.contact_normal_side_pass,
+                    *self.character.up,
+                    max_slope_angle,
+                );
+                let contact_height = movement_state.touched_obstacle_height;
+                let feet_height = original_bottom_point;
+                let step_threshold = slope_validation_step_offset;
+
+                let step_is_too_high = contact_height > feet_height + step_threshold;
+                if step_is_too_high && is_steep_slope { 
+                    movement_state.hit_non_walkable = true;
+                    return movement_state;
+                }
+            }
         }
+
         debug_log!(
             self.debug_config,
             "  DOWN PASS RESULTS: validate_triangle_down={}, hit_non_walkable={}, ground={:?}",
@@ -502,135 +529,120 @@ impl<'a> CharacterController<'a> {
         );
 
         // We hit something below us, is it walkable?
-        if movement_state.validate_triangle_down {
-            let max_slope = self
-                .grounding_config
-                .as_ref()
-                .map_or(std::f32::consts::FRAC_PI_4, |g| g.max_angle);
+        // 1897 (mFlags & STF_VALIDATE_TRIANGLE_DOWN) && dir_dot_up<=0.0f)
+        // if movement_state.validate_triangle_down && displacement.dot(*self.character.up) <= 0.0 {
+        //     let is_steep_slope = test_slope(
+        //         movement_state.contact_normal_down_pass,
+        //         *self.character.up,
+        //         max_slope_angle,
+        //     );
 
-            let is_steep_slope = test_slope(
-                movement_state.contact_normal_down_pass,
-                *self.character.up,
-                max_slope,
-            );
+        //     let contact_height = movement_state.touched_obstacle_height;
+        //     let feet_height = original_bottom_point;
+        //     let step_threshold = slope_validation_step_offset;
 
-            let contact_height = movement_state.touched_obstacle_height;
-            let feet_height = original_bottom_point;
-            let step_threshold = slope_validation_step_offset;
-            
-            debug_log!(
-                self.debug_config,
-                "  SLOPE VALIDATION: normal={:?}, angle={:.3}°, max={:.3}°, is_steep={}, contact_height={:.6}, feet_height={:.6}, step_threshold={:.6}",
-                movement_state.contact_normal_down_pass,
-                movement_state
-                    .contact_normal_down_pass
-                    .angle_between(*self.character.up)
-                    .to_degrees(),
-                max_slope.to_degrees(),
-                is_steep_slope,
-                contact_height,
-                feet_height,
-                step_threshold
-            );
+        //     debug_log!(
+        //         self.debug_config,
+        //         "  SLOPE VALIDATION: normal={:?}, angle={:.3}°, max={:.3}°, is_steep={}, contact_height={:.6}, feet_height={:.6}, step_threshold={:.6}",
+        //         movement_state.contact_normal_down_pass,
+        //         movement_state
+        //             .contact_normal_down_pass
+        //             .angle_between(*self.character.up)
+        //             .to_degrees(),
+        //         max_slope_angle.to_degrees(),
+        //         is_steep_slope,
+        //         contact_height,
+        //         feet_height,
+        //         step_threshold
+        //     );
 
-            let step_is_too_high = contact_height > feet_height + step_threshold;
-            let step_was_attempted = auto_step_offset > 0.0;
+        //     let step_is_too_high = contact_height > feet_height + step_threshold;
 
-            // ?? alternative to if(touchedTriHeight>mUserParams.mStepOffset && testSlope(Normal, upDirection, mUserParams.mSlopeLimit))
-            // PhysX reads like it lets you step up onto steep slopes but I'm not convinced I like that
-            if step_is_too_high && is_steep_slope {
-                movement_state.hit_non_walkable = true;
-            } 
-        }
+        //     // 1919: if(touchedTriHeight>mUserParams.mStepOffset && testSlope(Normal, upDirection, mUserParams.mSlopeLimit))
+        //     // PhysX actually tests against the highest point of the collided triangle here, we don't have the ability to do that
+        //     // Subbing this "start on walkable slope" logic for now...
+        //     // The idea is you can STAND on a too steep slope if you set the option, but can't move to a steep slope from a steep slope.
+        //     let prevented_from_climbing =  matches!(self.config.slide_mode, NonWalkableMode::PreventClimbing) && 
+        //         !started_attempt_on_walkable_slope &&
+        //         is_steep_slope;
 
-        // If we're in walk experiment mode, perform the PhysX recovery sweep
-        if movement_state.hit_non_walkable && movement_state.walk_experiment {
-            debug_log!(
-                self.debug_config,
-                "RECOVERY SWEEP: Performing PhysX-style recovery sweep for steep slope sliding"
-            );
+        //     if prevented_from_climbing {
+        //         movement_state.hit_non_walkable = true;
+                
+        //         if !movement_state.walk_experiment {
+        //             // Continuing is pointless if we aren't in the retry since we know we're going to run again
+        //             return movement_state;
+        //         }
 
-            // Set PhysX normalize response flag for recovery sweep
-            movement_state.normalize_response = true;
-            movement_state.prevent_vertical_motion = true;
+        //         // Begin recovery sweep
+        //         // I believe we should only hit this if we hit an unwalkable surface in the main pass
+        //         // Then, on the retry, we STILL hit an unwalkable surface.
 
-            // Calculate recovery distance (PhysX logic)
-            let current_height = movement_state.current_position.dot(*self.character.up);
-            let original_height = self.position.dot(*self.character.up);
-            let mut delta = if current_height > original_height {
-                current_height - original_height
-            } else {
-                0.0
-            };
-            delta += displacement.dot(*self.character.up).abs();
-            let recover_distance = delta;
+        //         movement_state.normalize_response = true; // 1932
 
-            // Create downward recovery vector
-            let recovery_vector = -*self.character.up * recover_distance;
+        //         let current_height = movement_state.current_position.dot(*self.character.up);
+        //         let original_height = self.position.dot(*self.character.up);
+        //         let mut delta = if current_height > original_height {
+        //             current_height - original_height
+        //         } else {
+        //             0.0
+        //         };
+        //         delta += displacement.dot(*self.character.up).abs();
+        //         let recover_distance = delta;
 
-            debug_log!(
-                self.debug_config,
-                "RECOVERY SWEEP: delta={:.6}, recover_distance={:.6}, recovery_vector={:?}",
-                delta,
-                recover_distance,
-                recovery_vector
-            );
+        //         movement_state.collision_flags = CharacterCollisionFlags::default(); // 1939
 
-            // Set target for recovery sweep
-            movement_state.target_orientation = movement_state.current_position + recovery_vector;
+        //         let recovery_min_dist = if recover_distance < min_distance {
+        //             recover_distance / max_iter as f32
+        //         } else {
+        //             min_distance
+        //         };
 
-            // Execute the recovery sweep with multiple iterations (this is the key!)
-            let recovery_min_dist = if recover_distance < min_distance {
-                recover_distance / max_iter as f32
-            } else {
-                min_distance
-            };
+        //         let recovery_vector = -*self.character.up * recover_distance;
+        //         movement_state.target_orientation =
+        //             movement_state.current_position + recovery_vector;
 
-            execute_sweep_pass(
-                &mut movement_state,
-                SweepPass::Down, // PhysX uses SWEEP_PASS_UP for compatibility, but it's technically a down pass
-                max_iter,
-                recovery_min_dist,
-                original_bottom_point,
-                &self.collider,
-                self.rotation,
-                self.grounding_config.as_ref(),
-                &self.config,
-                &self.spatial_query,
-                &self.filter,
-                self.character.up,
-                self.config.skin_width,
-                self.debug_config,
-            );
+        //         debug_log!(
+        //             self.debug_config,
+        //             "BEGIN RECOVERY SWEEP: delta={:.6}, recover_distance={:.6}, recovery_vector={:?}",
+        //             delta,
+        //             recover_distance,
+        //             recovery_vector
+        //         );
 
-            // Clear the normalize response flag
-            movement_state.normalize_response = false;
-            movement_state.prevent_vertical_motion = false;
+        //         execute_sweep_pass(
+        //             &mut movement_state,
+        //             SweepPass::Down, // or SweepPass::Up for PhysX compatibility
+        //             max_iter,
+        //             recovery_min_dist,
+        //             original_bottom_point,
+        //             &self.collider,
+        //             self.rotation,
+        //             self.grounding_config.as_ref(),
+        //             &self.config,
+        //             &self.spatial_query,
+        //             &self.filter,
+        //             self.character.up,
+        //             self.config.skin_width,
+        //             self.debug_config,
+        //         );
 
-            debug_log!(
-                self.debug_config,
-                "RECOVERY SWEEP: Final position after recovery: {:?}",
-                movement_state.current_position
-            );
-        }
+        //         movement_state.normalize_response = false; // 1954 after the recovoery sweep
 
-        // Store collision flags
-        movement_state.collision_flags = 0;
-        if collision_up {
-            movement_state.collision_flags |= 0x1;
-        }
-        if collision_sides {
-            movement_state.collision_flags |= 0x2;
-        }
-        if collision_down {
-            movement_state.collision_flags |= 0x4;
-        }
+        //         debug_log!(
+        //             self.debug_config,
+        //             "END RECOVERY SWEEP: Final position after recovery: {:?}",
+        //             movement_state.current_position
+        //         );
+        //     }
+        // }
 
+        movement_state.collision_flags = collisions;
         movement_state
     }
 }
 
-fn test_slope(normal: Vec3, up_direction: Vec3, slope_limit: f32) -> bool {
+pub fn test_slope(normal: Vec3, up_direction: Vec3, slope_limit: f32) -> bool {
     normal.angle_between(up_direction) > slope_limit
 }
 

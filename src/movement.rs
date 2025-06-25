@@ -36,7 +36,7 @@ pub(crate) fn character_gravity(
             gravity *= gravity_scale.0;
         }
 
-        velocity.0 += gravity * time.delta_secs();
+        velocity.0 += gravity * time.delta_secs(); // TODO: dont 10x gravity
     }
 }
 pub(crate) fn character_friction(
@@ -111,14 +111,66 @@ pub(crate) fn character_acceleration(
             continue;
         }
 
+        let old_velocity = character_velocity.0;
+        
+        // Get the desired world-space movement direction
+        let desired_world_movement = *direction * movement.target_speed * throttle;
+        
+        // Check if we're grounded and have a ground normal
+        let ground_normal = grounding
+            .and_then(|(grounding, _)| grounding.ground())
+            .map(|ground| *ground.normal);
+        
+        let new_horizontal_velocity = if let Some(ground_normal) = ground_normal {
+            // We're grounded - project movement onto the ground plane
+            project_movement_onto_ground_plane(desired_world_movement, ground_normal, *character.up)
+        } else {
+            // We're airborne - use world-space horizontal movement
+            desired_world_movement.reject_from(*character.up)
+        };
 
-        let old_velocity = character_velocity.0; // or .0 depending on your Velocity component
-        let mut new_velocity = *direction * movement.target_speed;
+        // Preserve vertical velocity and combine with new horizontal
+        let vertical_velocity = old_velocity.project_onto(*character.up);
+        character_velocity.0 = new_horizontal_velocity + vertical_velocity;
+    }
+}
 
-        // Preserve the old vertical velocity
-        new_velocity.y = old_velocity.y;
-
-        character_velocity.0 = new_velocity;
+/// Project desired movement onto the ground plane while preserving movement speed,
+/// but clamp out any upward velocity to prevent artificial jumping
+fn project_movement_onto_ground_plane(
+    desired_movement: Vec3, 
+    ground_normal: Vec3, 
+    up_direction: Vec3
+) -> Vec3 {
+    // Remove any vertical component from the desired movement
+    let horizontal_movement = desired_movement.reject_from(up_direction);
+    
+    if horizontal_movement.length_squared() < 1e-6 {
+        return Vec3::ZERO;
+    }
+    
+    // Project the horizontal movement onto the ground plane
+    let projected_movement = horizontal_movement.reject_from(ground_normal);
+    
+    // CRITICAL: Clamp out any upward component to prevent artificial jumping
+    let upward_component = projected_movement.dot(up_direction);
+    let clamped_movement = if upward_component > 0.0 {
+        // Remove the upward part, keep only horizontal and downward
+        projected_movement - up_direction * upward_component
+    } else {
+        // Downward or purely horizontal - keep as is
+        projected_movement
+    };
+    
+    // Preserve the original horizontal speed by scaling the clamped vector
+    let original_speed = horizontal_movement.length();
+    let clamped_speed = clamped_movement.length();
+    
+    if clamped_speed > 1e-6 {
+        clamped_movement * (original_speed / clamped_speed)
+    } else {
+        // If clamping resulted in near-zero vector, return zero movement
+        Vec3::ZERO
     }
 }
 
