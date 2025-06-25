@@ -196,11 +196,12 @@ fn setup(
         })),
     ));
 
-    // let shape = Capsule3d::new(0.4, 1.0);
+    //let shape = Capsule3d::new(0.4, 1.0);
     // let shape = Cuboid::from_length(0.4);
     // let shape = Cone::new(0.4, 1.4);
-    let shape = Capsule3d::new(0.2, 1.0);
-    // let shape = Cylinder::new(0.2, 1.0);
+    //let shape = Capsule3d::new(0.2, 1.0);
+     let shape = Cylinder::new(0.2, 1.0);
+    //let shape = Cuboid::from_size(Vec3::new(0.5, 1.4, 0.5));
 
     commands.spawn((
         Name::new("Player"),

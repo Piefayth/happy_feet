@@ -243,6 +243,15 @@ pub fn execute_sweep_pass(
                     }
                     
                     state.touched_obstacle_height = hit.point.dot(*up_direction);
+                    debug_log!(
+                        debug_config,
+                        "    {} HIT: normal={:?}, hit_point={:?}, contact_height={:.6}, character_pos={:?}",
+                        pass_label,
+                        hit.normal,
+                        hit.point,
+                        hit.point.dot(*up_direction),
+                        state.current_position
+                    );
                 }
                 SweepPass::Side => {
                     state.validate_triangle_side = true;
